@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/* ============================================================
+   Enums (prevents string chaos)
+============================================================ */
+
+enum Plan {
+  free
+  pro
+  pro_plus
+}
+
+enum SubscriptionStatus {
+  none
+  trialing
+  active
+  past_due
+  canceled
+}
+
+/* ============================================================
+   Models
+============================================================ */
+
+model UserAccess {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+
+  // ✅ Clerk identity (email)
+  email                String?
+  emailVerified        Boolean            @default(false)
+
+  // Subscription / plan
+  plan                 Plan               @default(free)
+  subscriptionStatus   SubscriptionStatus @default(none)
+
+  // Trials
+  hasUsedTrial         Boolean            @default(false)
+  trialStartedAt       DateTime?
+  trialEndsAt          DateTime?
+
+  // Stripe
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  currentPeriodEnd     DateTime?
+
+  // Admin bypass (access to everything)
+  isAdmin              Boolean            @default(false)
+
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  deals                Deal[]
+
+  @@index([userId])
+  @@index([plan])
+  @@index([subscriptionStatus])
+  @@index([trialEndsAt])
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+  @@index([email])
+}
+
+model Deal {
+  id        String   @id @default(cuid())
+
+  // Owner (Clerk userId)
+  userId    String
+
+  // Optional metadata for filtering/UX
+  title     String?
+  year      Int      @default(2024)
+
+  // Full saved calculator payload (inputs, KPIs, benchmarks, etc.)
+  // Pro users will have projection rows stripped before saving.
+  payload   Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relation
+  userAccess   UserAccess? @relation(fields: [userAccessId], references: [id], onDelete: SetNull)
+  userAccessId String?
+
+  @@index([userId])
+  @@index([year])
+  @@index([createdAt])
+  @@index([userAccessId])
+}
+
+model DealUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  date      DateTime // start-of-day UTC
+  count     Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId])
+}
+
+model FeatureUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  feature   String   // "cimAnalyzer" | "dealAnalyze"
+  day       DateTime // start-of-day UTC (or user tz if you want)
+  count     Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, feature, day])
+  @@index([userId, feature, day])
+}
