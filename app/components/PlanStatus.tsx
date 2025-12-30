@@ -3,6 +3,22 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
+type AccessResponse =
+  | {
+      ok: true;
+      plan: string;
+      entitlements?: any;
+      limits?: {
+        dealAnalyze?: {
+          usedToday?: number;
+        };
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 export default function PlanStatus() {
   const [data, setData] = useState<{
     plan: string;
@@ -10,9 +26,46 @@ export default function PlanStatus() {
   } | null>(null);
 
   useEffect(() => {
-    fetch("/api/me/access")
-      .then((r) => r.json())
-      .then((d) => setData(d));
+    let cancelled = false;
+
+    async function load() {
+      let res: Response;
+
+      try {
+        res = await fetch("/api/me/access", {
+          credentials: "include",
+        });
+      } catch {
+        return; // network / offline
+      }
+
+      if (!res.ok) {
+        // Not logged in yet (normal during hydration)
+        return;
+      }
+
+      let json: AccessResponse;
+      try {
+        json = await res.json();
+      } catch {
+        return; // non-JSON / empty body
+      }
+
+      if (!json.ok || cancelled) return;
+
+      const used =
+        json.entitlements?.limits?.dealAnalyze?.usedToday ?? 0;
+
+      setData({
+        plan: json.plan,
+        dailyDealCount: used,
+      });
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!data || data.plan === "free") return null;

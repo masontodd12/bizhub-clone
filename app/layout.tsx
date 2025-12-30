@@ -1,4 +1,6 @@
 // app/layout.tsx
+export const dynamic = "force-dynamic";
+
 import "./globals.css";
 import Link from "next/link";
 import { ClerkProvider, SignedIn, SignedOut } from "@clerk/nextjs";

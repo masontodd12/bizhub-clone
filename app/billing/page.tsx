@@ -1,25 +1,28 @@
-import { NextResponse } from "next/server";
-import Stripe from "stripe";
-import { auth } from "@clerk/nextjs/server";
-import { prisma } from "@/src/lib/prisma";
+"use client";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-12-15.clover",
-});
+export default function BillingPage() {
+  return (
+    <main className="min-h-screen bg-[#F7F8F6] px-6 py-12 text-[#111827]">
+      <div className="mx-auto max-w-xl rounded-2xl border border-black/10 bg-white p-6 shadow-sm">
+        <h1 className="text-2xl font-extrabold tracking-tight">Billing</h1>
+        <p className="mt-2 text-sm text-black/60">
+          Manage your subscription, invoices, and payment method in Stripe.
+        </p>
 
-export async function GET(req: Request) {
-  const { userId } = await auth();
-  if (!userId) return NextResponse.redirect(new URL("/sign-in", req.url));
+        <a
+          href="/api/billing-portal"
+          className="mt-6 inline-flex w-full items-center justify-center rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668]"
+        >
+          Open Billing Portal
+        </a>
 
-  const access = await prisma.userAccess.findUnique({ where: { userId } });
-  if (!access?.stripeCustomerId) {
-    return NextResponse.redirect(new URL("/pricing", req.url));
-  }
-
-  const portal = await stripe.billingPortal.sessions.create({
-    customer: access.stripeCustomerId,
-    return_url: `${process.env.NEXT_PUBLIC_APP_URL}/billing`,
-  });
-
-  return NextResponse.redirect(portal.url);
+        <a
+          href="/account/deals"
+          className="mt-3 block text-center text-sm font-semibold text-black/60 hover:text-black"
+        >
+          Back to account
+        </a>
+      </div>
+    </main>
+  );
 }
