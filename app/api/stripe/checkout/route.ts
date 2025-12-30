@@ -10,26 +10,26 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: "2025-12-15.clover",
 });
 
-function getPriceId(plan: "pro" | "pro_plus") {
+type Plan = "pro" | "pro_plus";
+
+function getPriceId(plan: Plan) {
   if (plan === "pro") return process.env.STRIPE_PRICE_PRO!;
   return process.env.STRIPE_PRICE_PRO_PLUS!;
 }
 
 function getBaseUrl(req: Request) {
-  // ✅ Best practice: set this in Vercel + .env.local
-  // PROD: https://underwritehq.com
-  // DEV:  http://localhost:3001
+  // Prefer explicit env var (best for Stripe redirect URLs)
   const envUrl =
     process.env.NEXT_PUBLIC_APP_URL ||
     process.env.APP_URL ||
-    process.env.VERCEL_PROJECT_PRODUCTION_URL;
+    process.env.VERCEL_PROJECT_PRODUCTION_URL ||
+    process.env.VERCEL_URL;
 
   if (envUrl) {
-    // ensure protocol
     return envUrl.startsWith("http") ? envUrl : `https://${envUrl}`;
   }
 
-  // ✅ Fallback: derive from request host (works in Vercel + local)
+  // Fallback: derive from headers (works local + Vercel)
   const host = req.headers.get("host");
   const proto = req.headers.get("x-forwarded-proto") || "http";
   if (!host) throw new Error("Missing host header to build base URL");
@@ -39,28 +39,33 @@ function getBaseUrl(req: Request) {
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
+  // 1) Must be signed in
   const { userId } = await auth();
   if (!userId) {
-    return NextResponse.redirect(new URL(`/login?redirect_url=/pricing`, url.origin));
+    return NextResponse.redirect(
+      new URL(`/login?redirect_url=/pricing`, url.origin)
+    );
   }
 
+  // 2) Validate plan
   const planParam = url.searchParams.get("plan");
   if (planParam !== "pro" && planParam !== "pro_plus") {
     return NextResponse.redirect(new URL("/pricing", url.origin));
   }
-
-  const plan = planParam as "pro" | "pro_plus";
+  const plan = planParam as Plan;
   const priceId = getPriceId(plan);
 
+  // 3) Build safe absolute URLs for Stripe
   const baseUrl = getBaseUrl(req);
 
-  // Ensure row exists
+  // 4) Ensure access row exists
   const access = await prisma.userAccess.upsert({
     where: { userId },
     update: {},
     create: { userId },
   });
 
+  // 5) Ensure Stripe customer exists
   let customerId = access.stripeCustomerId;
 
   if (!customerId) {
@@ -76,6 +81,7 @@ export async function GET(req: Request) {
     });
   }
 
+  // 6) Create checkout session
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
     customer: customerId,
@@ -87,10 +93,12 @@ export async function GET(req: Request) {
       ...(access.hasUsedTrial ? {} : { trial_period_days: 3 }),
     },
 
-    metadata: { userId },
+    metadata: {
+      userId,
+      plan,
+    },
 
-    // ✅ IMPORTANT: match the route you actually created:
-    // you created: app/account/billing/success/page.tsx  => /account/billing/success
+    // ✅ MUST include {CHECKOUT_SESSION_ID}
     success_url: `${baseUrl}/account/billing/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/pricing`,
   });
