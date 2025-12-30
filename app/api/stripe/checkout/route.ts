@@ -15,29 +15,44 @@ function getPriceId(plan: "pro" | "pro_plus") {
   return process.env.STRIPE_PRICE_PRO_PLUS!;
 }
 
+function getBaseUrl(req: Request) {
+  // ✅ Best practice: set this in Vercel + .env.local
+  // PROD: https://underwritehq.com
+  // DEV:  http://localhost:3001
+  const envUrl =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.APP_URL ||
+    process.env.VERCEL_PROJECT_PRODUCTION_URL;
+
+  if (envUrl) {
+    // ensure protocol
+    return envUrl.startsWith("http") ? envUrl : `https://${envUrl}`;
+  }
+
+  // ✅ Fallback: derive from request host (works in Vercel + local)
+  const host = req.headers.get("host");
+  const proto = req.headers.get("x-forwarded-proto") || "http";
+  if (!host) throw new Error("Missing host header to build base URL");
+  return `${proto}://${host}`;
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
   const { userId } = await auth();
   if (!userId) {
-    // ✅ Your app uses /login (not /sign-in)
-    // After login, Clerk will send them back to /pricing, and they can click again.
-    return NextResponse.redirect(
-      new URL(`/login?redirect_url=/pricing`, url.origin)
-    );
+    return NextResponse.redirect(new URL(`/login?redirect_url=/pricing`, url.origin));
   }
 
   const planParam = url.searchParams.get("plan");
   if (planParam !== "pro" && planParam !== "pro_plus") {
     return NextResponse.redirect(new URL("/pricing", url.origin));
   }
+
   const plan = planParam as "pro" | "pro_plus";
   const priceId = getPriceId(plan);
 
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
-  if (!baseUrl) throw new Error("Missing NEXT_PUBLIC_APP_URL / VERCEL_URL");
+  const baseUrl = getBaseUrl(req);
 
   // Ensure row exists
   const access = await prisma.userAccess.upsert({
@@ -74,7 +89,9 @@ export async function GET(req: Request) {
 
     metadata: { userId },
 
-    success_url: `${baseUrl}/billing/success`,
+    // ✅ IMPORTANT: match the route you actually created:
+    // you created: app/account/billing/success/page.tsx  => /account/billing/success
+    success_url: `${baseUrl}/account/billing/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/pricing`,
   });
 
