@@ -9,7 +9,6 @@ import ProfileMenu from "./components/ProfileMenu";
 import AccessBootstrapper from "./components/AccessBootstrapper";
 import PlanStatus from "@/app/components/PlanStatus";
 
-
 export const metadata = {
   title: "Underwrite",
   description: "Market data and deal analysis tools",
@@ -68,8 +67,14 @@ function Navbar() {
             {/* Ensure UserAccess row exists */}
             <AccessBootstrapper />
 
-            {/* ✅ Plan badge + usage meter */}
-            <PlanStatus />
+            {/* ✅ CLICKABLE Plan badge + usage meter => Stripe Billing Portal */}
+            <a
+              href="/api/billing-portal"
+              className="rounded-full hover:bg-black/[0.03] transition"
+              title="Manage subscription"
+            >
+              <PlanStatus />
+            </a>
 
             <ProfileMenu />
           </SignedIn>
