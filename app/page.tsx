@@ -90,12 +90,6 @@ export default function HomePage() {
                 >
                   View Market Data
                 </a>
-                <a
-                  href="/dashboard"
-                  className="rounded-xl border border-black/10 bg-white px-6 py-3 text-sm font-semibold text-[#111827] hover:bg-black/[0.03]"
-                >
-                  Go to Dashboard
-                </a>
               </div>
 
               <div className="mt-9 flex flex-wrap gap-6 text-xs text-black/50">
