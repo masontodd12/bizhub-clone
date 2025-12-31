@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 
 type AccessResponse =
   | {
@@ -70,10 +69,8 @@ export default function PlanStatus() {
   const limit = isProPlus ? "∞" : "3";
 
   return (
-    <Link
-      href="/api/billing-portal"
-      prefetch={false}
-      className="flex items-center gap-2 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs hover:bg-black/[0.03]"
+    <div
+      className="flex cursor-pointer items-center gap-2 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs hover:bg-black/[0.03]"
       title="Manage subscription"
     >
       <span className="rounded-full bg-[#2F5D50] px-2 py-0.5 text-[10px] font-bold text-white">
@@ -85,6 +82,6 @@ export default function PlanStatus() {
       </span>
 
       <span className="text-black/40">Manage</span>
-    </Link>
+    </div>
   );
 }

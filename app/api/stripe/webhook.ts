@@ -46,10 +46,20 @@ function effectiveAppStatus(sub: Stripe.Subscription) {
   return "none";
 }
 
+function subscriptionHasTrial(sub: Stripe.Subscription) {
+  const trialStart = (sub as any).trial_start as number | null | undefined;
+  const trialEnd = (sub as any).trial_end as number | null | undefined;
+
+  return (
+    sub.status === "trialing" ||
+    (trialStart != null && trialEnd != null && trialEnd > trialStart)
+  );
+}
+
 async function findAccessByCustomer(customerId: string) {
   return prisma.userAccess.findFirst({
     where: { stripeCustomerId: customerId },
-    select: { userId: true },
+    select: { userId: true, hasUsedTrial: true },
   });
 }
 
@@ -106,6 +116,14 @@ async function upsertFromSubscription(
           : null,
     },
   });
+
+  // ✅ NEW: burn trial as soon as Stripe grants it (not when payment succeeds)
+  if (subscriptionHasTrial(sub) && !access.hasUsedTrial) {
+    await prisma.userAccess.update({
+      where: { userId: access.userId },
+      data: { hasUsedTrial: true },
+    });
+  }
 }
 
 /* ---------------- webhook ---------------- */
@@ -130,7 +148,6 @@ export async function POST(req: Request) {
   try {
     switch (event.type) {
       case "checkout.session.completed": {
-        // Can occur before money moves (esp trials). Just sync.
         const session = event.data.object as Stripe.Checkout.Session;
         const customerId = session.customer as string | null;
         const subscriptionId = session.subscription as string | null;
@@ -184,7 +201,7 @@ export async function POST(req: Request) {
       }
 
       case "invoice.payment_succeeded": {
-        // ✅ Flip hasUsedTrial ONLY when payment succeeds
+        // Still okay to keep this (burned already for trials, but harmless)
         const invoice = event.data.object as Stripe.Invoice;
 
         const customerId =
@@ -192,10 +209,7 @@ export async function POST(req: Request) {
             ? invoice.customer
             : invoice.customer?.id;
 
-        // Typings issue with your Stripe apiVersion — cast to any.
         const subscriptionId = (invoice as any).subscription as string | null;
-
-        // Only proceed for subscription invoices
         if (!customerId || !subscriptionId) break;
 
         const access = await findAccessByCustomer(customerId);
@@ -212,7 +226,7 @@ export async function POST(req: Request) {
         await prisma.userAccess.update({
           where: { userId: access.userId },
           data: {
-            hasUsedTrial: true, // ✅ burned forever after first successful pay
+            hasUsedTrial: true,
             plan,
             subscriptionStatus,
             stripeSubscriptionId: sub.id,

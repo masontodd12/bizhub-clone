@@ -49,7 +49,7 @@ function Navbar() {
         <div className="ml-auto flex items-center gap-3">
           <Link
             href="/data"
-            className="rounded-full border border-[#2F5D50]/30 bg-[#2F5D50] px-4 py-1.5 text-xs font-semibold text-white hover:bg-[#3F7668] transition"
+            className="rounded-full border border-[#2F5D50]/30 bg-[#2F5D50] px-4 py-1.5 text-xs font-semibold text-white transition hover:bg-[#3F7668]"
           >
             Explore Data
           </Link>
@@ -57,7 +57,7 @@ function Navbar() {
           <SignedOut>
             <Link
               href="/login"
-              className="rounded-full border border-black/10 bg-white px-4 py-1.5 text-xs font-semibold text-[#111827] hover:bg-black/[0.03] transition"
+              className="rounded-full border border-black/10 bg-white px-4 py-1.5 text-xs font-semibold text-[#111827] transition hover:bg-black/[0.03]"
             >
               Log in
             </Link>
@@ -67,14 +67,17 @@ function Navbar() {
             {/* Ensure UserAccess row exists */}
             <AccessBootstrapper />
 
-            {/* ✅ CLICKABLE Plan badge + usage meter => Stripe Billing Portal */}
-            <a
-              href="/api/billing-portal"
-              className="rounded-full hover:bg-black/[0.03] transition"
+            {/* ✅ Manage goes to your own billing page */}
+            <Link
+              href="/billing"
+              className="rounded-full"
               title="Manage subscription"
+              prefetch={false}
             >
-              <PlanStatus />
-            </a>
+              <div className="rounded-full transition hover:bg-black/[0.03]">
+                <PlanStatus />
+              </div>
+            </Link>
 
             <ProfileMenu />
           </SignedIn>
