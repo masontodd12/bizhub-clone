@@ -43,10 +43,7 @@ export async function GET() {
   const { userId } = await auth();
 
   if (!userId) {
-    return NextResponse.json(
-      { ok: false, error: "Unauthorized" },
-      { status: 401 }
-    );
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
   let email: string | null = null;
@@ -54,14 +51,11 @@ export async function GET() {
 
   try {
     const client = await clerkClient();
-const user = await client.users.getUser(userId);
-
+    const user = await client.users.getUser(userId);
 
     const primaryId = user.primaryEmailAddressId;
     const primary = primaryId
-      ? user.emailAddresses.find(
-          (e: { id: string }) => e.id === primaryId
-        )
+      ? user.emailAddresses.find((e: { id: string }) => e.id === primaryId)
       : undefined;
 
     const chosen = primary ?? user.emailAddresses?.[0];
@@ -88,6 +82,10 @@ const user = await client.users.getUser(userId);
   const plan = String(ua?.plan ?? "free");
   const isAdmin = ua?.isAdmin ?? false;
 
+  // ✅ Never expose a paid status if plan is free (prevents UI weirdness)
+  const subscriptionStatus =
+    plan === "free" ? "none" : String(ua?.subscriptionStatus ?? "none");
+
   const entitlements = getEntitlements({ plan, isAdmin });
 
   const day = startOfDayUTC();
@@ -102,6 +100,7 @@ const user = await client.users.getUser(userId);
   return NextResponse.json({
     ok: true,
     plan,
+    subscriptionStatus,
     isAdmin,
     user: { userId, email, emailVerified },
     entitlements: {

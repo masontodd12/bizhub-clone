@@ -31,11 +31,14 @@ function effectiveAppPlan(sub: Stripe.Subscription, priceId?: string | null) {
   return planFromPriceId(priceId);
 }
 
+// ✅ FIXED: preserve "trialing" (your enum includes it)
 function effectiveAppStatus(sub: Stripe.Subscription) {
   if ((sub as any).cancel_at_period_end) return "canceled";
 
-  if (sub.status === "active" || sub.status === "trialing") return "active";
+  if (sub.status === "trialing") return "trialing";
+  if (sub.status === "active") return "active";
   if (sub.status === "past_due") return "past_due";
+
   if (
     sub.status === "canceled" ||
     sub.status === "unpaid" ||
@@ -65,7 +68,7 @@ async function findAccessByCustomer(customerId: string) {
 
 /**
  * Sync plan/status/period dates from a subscription.
- * IMPORTANT: does NOT touch hasUsedTrial.
+ * Burns hasUsedTrial as soon as Stripe grants a trial.
  */
 async function upsertFromSubscription(
   customerId: string,
@@ -86,6 +89,8 @@ async function upsertFromSubscription(
     | null
     | undefined;
 
+  const hasTrial = subscriptionHasTrial(sub);
+
   await prisma.userAccess.update({
     where: { userId: access.userId },
     data: {
@@ -94,19 +99,11 @@ async function upsertFromSubscription(
       subscriptionStatus,
       plan,
 
+      // ✅ keep trial dates if Stripe has them
       trialStartedAt:
-        plan === "free"
-          ? null
-          : trialStart
-          ? new Date(trialStart * 1000)
-          : null,
+        hasTrial && trialStart ? new Date(trialStart * 1000) : null,
 
-      trialEndsAt:
-        plan === "free"
-          ? null
-          : trialEnd
-          ? new Date(trialEnd * 1000)
-          : null,
+      trialEndsAt: hasTrial && trialEnd ? new Date(trialEnd * 1000) : null,
 
       currentPeriodEnd:
         plan === "free"
@@ -114,16 +111,11 @@ async function upsertFromSubscription(
           : currentPeriodEnd
           ? new Date(currentPeriodEnd * 1000)
           : null,
+
+      // ✅ burn trial immediately once granted
+      hasUsedTrial: access.hasUsedTrial ? true : hasTrial ? true : false,
     },
   });
-
-  // ✅ NEW: burn trial as soon as Stripe grants it (not when payment succeeds)
-  if (subscriptionHasTrial(sub) && !access.hasUsedTrial) {
-    await prisma.userAccess.update({
-      where: { userId: access.userId },
-      data: { hasUsedTrial: true },
-    });
-  }
 }
 
 /* ---------------- webhook ---------------- */
@@ -193,7 +185,7 @@ export async function POST(req: Request) {
             stripePriceId: null,
             stripeSubscriptionId: null,
             currentPeriodEnd: null,
-            // IMPORTANT: do NOT touch hasUsedTrial here
+            // IMPORTANT: do NOT set hasUsedTrial false here
           },
         });
 
@@ -201,7 +193,6 @@ export async function POST(req: Request) {
       }
 
       case "invoice.payment_succeeded": {
-        // Still okay to keep this (burned already for trials, but harmless)
         const invoice = event.data.object as Stripe.Invoice;
 
         const customerId =
@@ -220,15 +211,13 @@ export async function POST(req: Request) {
         });
 
         const priceId = sub.items?.data?.[0]?.price?.id ?? null;
-        const plan = effectiveAppPlan(sub, priceId);
-        const subscriptionStatus = effectiveAppStatus(sub);
 
         await prisma.userAccess.update({
           where: { userId: access.userId },
           data: {
-            hasUsedTrial: true,
-            plan,
-            subscriptionStatus,
+            hasUsedTrial: true, // harmless redundancy
+            plan: effectiveAppPlan(sub, priceId),
+            subscriptionStatus: effectiveAppStatus(sub),
             stripeSubscriptionId: sub.id,
             stripePriceId: priceId,
           },

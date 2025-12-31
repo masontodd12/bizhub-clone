@@ -10,31 +10,34 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 });
 
 function unwrap<T>(resp: any): T {
-  // Stripe SDK sometimes returns Response<T> (with a .data) and sometimes T directly.
-  return resp && typeof resp === "object" && "data" in resp ? (resp.data as T) : (resp as T);
+  return resp && typeof resp === "object" && "data" in resp
+    ? (resp.data as T)
+    : (resp as T);
+}
+
+function subscriptionHasTrial(sub: Stripe.Subscription) {
+  const trialStart = (sub as any).trial_start as number | null | undefined;
+  const trialEnd = (sub as any).trial_end as number | null | undefined;
+
+  return (
+    sub.status === "trialing" ||
+    (trialStart != null && trialEnd != null && trialEnd > trialStart)
+  );
 }
 
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json(
-        { ok: false, error: "Not authenticated" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
     }
 
     const body = await req.json().catch(() => null);
     const session_id = body?.session_id as string | undefined;
-
     if (!session_id) {
-      return NextResponse.json(
-        { ok: false, error: "Missing session_id" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing session_id" }, { status: 400 });
     }
 
-    // 1) Retrieve Checkout Session
     const sessionRaw = await stripe.checkout.sessions.retrieve(session_id);
     const session = unwrap<Stripe.Checkout.Session>(sessionRaw);
 
@@ -48,25 +51,27 @@ export async function POST(req: Request) {
     const customerId = session.customer as string;
     const subscriptionId = session.subscription as string;
 
-    // 2) Retrieve Subscription (unwrap Response<Subscription> -> Subscription)
     const subRaw = await stripe.subscriptions.retrieve(subscriptionId);
     const subscription = unwrap<Stripe.Subscription>(subRaw);
 
     const priceId = subscription.items.data[0]?.price?.id ?? null;
+    const plan = priceId === process.env.STRIPE_PRICE_PRO_PLUS ? "pro_plus" : "pro";
 
-    const plan =
-      priceId === process.env.STRIPE_PRICE_PRO_PLUS ? "pro_plus" : "pro";
-
-    // ✅ Fix TS: read current_period_end safely
-    const currentPeriodEndSeconds = Number(
-      (subscription as any).current_period_end
-    );
-
+    const currentPeriodEndSeconds = Number((subscription as any).current_period_end);
     const currentPeriodEnd = Number.isFinite(currentPeriodEndSeconds)
       ? new Date(currentPeriodEndSeconds * 1000)
       : null;
 
-    // 3) Update/create the UserAccess row safely by id
+    const hasTrial = subscriptionHasTrial(subscription);
+    const trialStart = Number((subscription as any).trial_start);
+    const trialEnd = Number((subscription as any).trial_end);
+
+    const trialStartedAt =
+      hasTrial && Number.isFinite(trialStart) ? new Date(trialStart * 1000) : null;
+
+    const trialEndsAt =
+      hasTrial && Number.isFinite(trialEnd) ? new Date(trialEnd * 1000) : null;
+
     const existing = await prisma.userAccess.findFirst({ where: { userId } });
 
     const updated = existing
@@ -79,6 +84,11 @@ export async function POST(req: Request) {
             subscriptionStatus: subscription.status as any,
             currentPeriodEnd,
             plan,
+
+            // ✅ burn trial immediately if present
+            hasUsedTrial: existing.hasUsedTrial ? true : hasTrial ? true : false,
+            trialStartedAt,
+            trialEndsAt,
           },
         })
       : await prisma.userAccess.create({
@@ -90,16 +100,16 @@ export async function POST(req: Request) {
             subscriptionStatus: subscription.status as any,
             currentPeriodEnd,
             plan,
+
+            hasUsedTrial: hasTrial,
+            trialStartedAt,
+            trialEndsAt,
           },
         });
 
-    // Return proof (so you can see it worked)
     return NextResponse.json({ ok: true, updated });
   } catch (err: any) {
     console.error("Stripe sync error:", err);
-    return NextResponse.json(
-      { ok: false, error: err?.message ?? "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: err?.message ?? "Unknown error" }, { status: 500 });
   }
 }

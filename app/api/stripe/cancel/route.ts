@@ -19,6 +19,7 @@ export async function POST() {
     select: {
       stripeCustomerId: true,
       stripeSubscriptionId: true,
+      hasUsedTrial: true,
     },
   });
 
@@ -26,22 +27,18 @@ export async function POST() {
   let cancelled = false;
   let stripeError: string | null = null;
 
-  // --- STRIPE (best effort, never block DB downgrade) ---
+  // --- STRIPE (best effort) ---
   try {
-    // If we don't trust stored subId, try to find an active-like sub by customer
     if (access?.stripeCustomerId) {
-      // If stored subId exists, try cancel it first
       if (attemptedSubId) {
         try {
           await stripe.subscriptions.cancel(attemptedSubId);
           cancelled = true;
         } catch (e: any) {
           stripeError = e?.message ?? "Stripe cancel failed for stored subId";
-          // fall through to list subscriptions
         }
       }
 
-      // If not cancelled yet, list and cancel the real active sub (if any)
       if (!cancelled) {
         const subs = await stripe.subscriptions.list({
           customer: access.stripeCustomerId,
@@ -69,33 +66,33 @@ export async function POST() {
     stripeError = e?.message ?? "Stripe error";
   }
 
-  // --- ALWAYS DOWNGRADE DB (this is what your app reads) ---
+  // --- DB TRUTH: always clean state ---
   await prisma.userAccess.upsert({
     where: { userId },
     update: {
       plan: "free",
+      subscriptionStatus: "canceled",     // ✅ fix stale trialing
+      hasUsedTrial: true,                 // ✅ burn trial permanently (if they ever hit trial)
+      trialStartedAt: null,
+      trialEndsAt: null,
       stripeSubscriptionId: null,
       stripePriceId: null,
+      currentPeriodEnd: null,
     },
     create: {
       userId,
       plan: "free",
+      subscriptionStatus: "canceled",
+      hasUsedTrial: true,
       stripeCustomerId: access?.stripeCustomerId ?? null,
-      stripeSubscriptionId: null,
-      stripePriceId: null,
     },
   });
 
-  // return ok even if Stripe couldn't cancel (because DB is now free)
   return NextResponse.json({
     ok: true,
     downgraded: true,
     cancelledInStripe: cancelled,
     attemptedSubId,
     stripeError,
-    note:
-      stripeError
-        ? "DB downgraded to free, but Stripe cancellation did not complete. Check Stripe key mode (test vs live)."
-        : "DB downgraded and Stripe cancelled.",
   });
 }
