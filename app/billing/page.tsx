@@ -2,13 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 
 export default function BillingSuccessPage() {
   const sp = useSearchParams();
   const sessionId = sp.get("session_id");
 
   const [status, setStatus] = useState<"loading" | "ok" | "error">("loading");
-  const [message, setMessage] = useState<string>("Finalizing your subscription…");
+  const [message, setMessage] = useState<string>(
+    "Finalizing your subscription…"
+  );
 
   async function sync() {
     if (!sessionId) {
@@ -23,23 +26,30 @@ export default function BillingSuccessPage() {
 
       const res = await fetch("/api/stripe/sync", {
         method: "POST",
+        credentials: "include",
+        cache: "no-store",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId }),
       });
 
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({} as any));
 
       if (!res.ok || !data?.ok) {
         throw new Error(data?.error || "Sync failed");
       }
 
-      setStatus("ok");
-      setMessage("Subscription activated ✅ Redirecting…");
+      // refresh app access state (navbar/plan badge)
+      await fetch("/api/me/access", {
+        credentials: "include",
+        cache: "no-store",
+      }).catch(() => {});
 
-      // small delay so user sees success
+      setStatus("ok");
+      setMessage("Subscription activated ✅ Taking you home…");
+
       setTimeout(() => {
-        window.location.href = "/account/billing";
-      }, 600);
+        window.location.href = "/";
+      }, 700);
     } catch (e: any) {
       setStatus("error");
       setMessage(
@@ -55,7 +65,7 @@ export default function BillingSuccessPage() {
   }, [sessionId]);
 
   return (
-    <main className="min-h-screen bg-[#F7F8F6] px-6 py-12 text-[#111827]">
+    <main className="min-h-[calc(100vh-56px)] bg-[#F7F8F6] px-6 py-12 text-[#111827]">
       <div className="mx-auto max-w-xl rounded-2xl border border-black/10 bg-white p-6 shadow-sm">
         <h1 className="text-2xl font-extrabold tracking-tight">
           Payment successful ✅
@@ -78,22 +88,39 @@ export default function BillingSuccessPage() {
               Retry activation
             </button>
 
-            <a
-              href="/account/billing"
-              className="block text-center text-sm font-semibold text-black/60 hover:text-black"
-            >
-              Go to billing
-            </a>
+            <div className="flex items-center justify-center gap-4 text-sm">
+              <Link
+                href="/pricing"
+                className="font-semibold text-black/60 hover:text-black"
+              >
+                Back to pricing
+              </Link>
+              <Link
+                href="/billing"
+                className="font-semibold text-black/60 hover:text-black"
+              >
+                Go to billing
+              </Link>
+            </div>
           </div>
         )}
 
         {status === "ok" && (
-          <a
-            href="/account/billing"
-            className="mt-6 inline-flex w-full items-center justify-center rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668]"
-          >
-            Continue to billing
-          </a>
+          <div className="mt-6 space-y-3">
+            <Link
+              href="/"
+              className="inline-flex w-full items-center justify-center rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668]"
+            >
+              Continue to Home
+            </Link>
+
+            <Link
+              href="/billing"
+              className="block text-center text-sm font-semibold text-black/60 hover:text-black"
+            >
+              Go to billing
+            </Link>
+          </div>
         )}
       </div>
     </main>
