@@ -3,11 +3,18 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 const isAuthRoute = createRouteMatcher(["/login(.*)", "/signup(.*)"]);
+
 const isPublicRoute = createRouteMatcher([
   "/",
   "/pricing(.*)",
-  "/sso-callback(.*)",      // ✅ IMPORTANT
-  "/api/stripe/webhook(.*)" // ✅ webhook must stay public
+  "/about(.*)",
+  "/data(.*)",
+
+  // ✅ Clerk SSO redirect landing
+  "/sso-callback(.*)",
+
+  // ✅ Stripe webhooks must be public
+  "/api/stripe/webhook(.*)",
 ]);
 
 const isProtectedRoute = createRouteMatcher([
