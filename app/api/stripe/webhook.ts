@@ -17,10 +17,32 @@ function planFromPriceId(priceId?: string | null) {
   return "free";
 }
 
-function mapStatus(status: Stripe.Subscription.Status) {
-  if (status === "active" || status === "trialing") return "active";
-  if (status === "past_due") return "past_due";
-  if (status === "canceled" || status === "unpaid") return "canceled";
+// IMPORTANT: drop app-access immediately if user scheduled cancel
+function effectiveAppPlan(sub: Stripe.Subscription, priceId?: string | null) {
+  if ((sub as any).cancel_at_period_end) return "free";
+  if (
+    sub.status === "canceled" ||
+    sub.status === "unpaid" ||
+    sub.status === "incomplete_expired"
+  ) {
+    return "free";
+  }
+  return planFromPriceId(priceId);
+}
+
+function effectiveAppStatus(sub: Stripe.Subscription) {
+  // If they scheduled cancellation, treat as canceled in YOUR app
+  if ((sub as any).cancel_at_period_end) return "canceled";
+
+  if (sub.status === "active" || sub.status === "trialing") return "active";
+  if (sub.status === "past_due") return "past_due";
+  if (
+    sub.status === "canceled" ||
+    sub.status === "unpaid" ||
+    sub.status === "incomplete_expired"
+  )
+    return "canceled";
+
   return "none";
 }
 
@@ -28,6 +50,53 @@ async function findAccessByCustomer(customerId: string) {
   return prisma.userAccess.findFirst({
     where: { stripeCustomerId: customerId },
     select: { userId: true },
+  });
+}
+
+async function upsertFromSubscription(customerId: string, sub: Stripe.Subscription) {
+  const access = await findAccessByCustomer(customerId);
+  if (!access) return;
+
+  const priceId = sub.items?.data?.[0]?.price?.id ?? null;
+
+  const plan = effectiveAppPlan(sub, priceId);
+  const subscriptionStatus = effectiveAppStatus(sub);
+
+  const trialStart = (sub as any).trial_start as number | null | undefined;
+  const trialEnd = (sub as any).trial_end as number | null | undefined;
+
+  // TS-safe: Stripe returns this, but some typings miss it
+  const currentPeriodEnd = (sub as any).current_period_end as number | null | undefined;
+
+  await prisma.userAccess.update({
+    where: { userId: access.userId },
+    data: {
+      stripeSubscriptionId: sub.id,
+      stripePriceId: priceId,
+      subscriptionStatus,
+      plan,
+      hasUsedTrial: true,
+
+      trialStartedAt:
+        plan === "free"
+          ? null
+          : trialStart
+          ? new Date(trialStart * 1000)
+          : null,
+      trialEndsAt:
+        plan === "free"
+          ? null
+          : trialEnd
+          ? new Date(trialEnd * 1000)
+          : null,
+
+      currentPeriodEnd:
+        plan === "free"
+          ? null
+          : currentPeriodEnd
+          ? new Date(currentPeriodEnd * 1000)
+          : null,
+    },
   });
 }
 
@@ -51,104 +120,80 @@ export async function POST(req: Request) {
   }
 
   try {
-    /* checkout completed */
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object as Stripe.Checkout.Session;
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const customerId = session.customer as string | null;
+        const subscriptionId = session.subscription as string | null;
+        if (!customerId || !subscriptionId) break;
 
-      const customerId = session.customer as string | null;
-      const subscriptionId = session.subscription as string | null;
-      if (!customerId || !subscriptionId)
-        return NextResponse.json({ received: true });
+        const sub = await stripe.subscriptions.retrieve(subscriptionId, {
+          expand: ["items.data.price"],
+        });
 
-      const access = await findAccessByCustomer(customerId);
-      if (!access) return NextResponse.json({ received: true });
+        await upsertFromSubscription(customerId, sub);
+        break;
+      }
 
-      const sub = await stripe.subscriptions.retrieve(subscriptionId, {
-        expand: ["items.data.price"],
-      });
+      case "customer.subscription.created":
+      case "customer.subscription.updated": {
+        const sub = event.data.object as Stripe.Subscription;
+        const customerId = sub.customer as string | null;
+        if (!customerId) break;
 
-      const priceId = sub.items.data[0]?.price?.id ?? null;
+        // Ensure we have price expanded when Stripe sends minimal payloads
+        const fullSub = await stripe.subscriptions.retrieve(sub.id, {
+          expand: ["items.data.price"],
+        });
 
-      await prisma.userAccess.update({
-        where: { userId: access.userId },
-        data: {
-          stripeSubscriptionId: sub.id,
-          subscriptionStatus: mapStatus(sub.status),
-          plan: planFromPriceId(priceId),
-          hasUsedTrial: true,
-          trialStartedAt: sub.trial_start
-            ? new Date(sub.trial_start * 1000)
-            : null,
-          trialEndsAt: sub.trial_end
-            ? new Date(sub.trial_end * 1000)
-            : null,
-        },
-      });
-    }
+        await upsertFromSubscription(customerId, fullSub);
+        break;
+      }
 
-    /* subscription updated */
-    if (event.type === "customer.subscription.updated") {
-      const sub = event.data.object as Stripe.Subscription;
-      const customerId = sub.customer as string | null;
-      if (!customerId) return NextResponse.json({ received: true });
+      case "customer.subscription.deleted": {
+        const sub = event.data.object as Stripe.Subscription;
+        const customerId = sub.customer as string | null;
+        if (!customerId) break;
 
-      const access = await findAccessByCustomer(customerId);
-      if (!access) return NextResponse.json({ received: true });
+        const access = await findAccessByCustomer(customerId);
+        if (!access) break;
 
-      const priceId = sub.items.data[0]?.price?.id ?? null;
+        await prisma.userAccess.update({
+          where: { userId: access.userId },
+          data: {
+            subscriptionStatus: "canceled",
+            plan: "free",
+            hasUsedTrial: true,
+            trialStartedAt: null,
+            trialEndsAt: null,
+            stripePriceId: null,
+            stripeSubscriptionId: null,
+            currentPeriodEnd: null,
+          },
+        });
 
-      await prisma.userAccess.update({
-        where: { userId: access.userId },
-        data: {
-          stripeSubscriptionId: sub.id,
-          subscriptionStatus: mapStatus(sub.status),
-          plan: planFromPriceId(priceId),
-          hasUsedTrial: true,
-          trialStartedAt: sub.trial_start
-            ? new Date(sub.trial_start * 1000)
-            : null,
-          trialEndsAt: sub.trial_end
-            ? new Date(sub.trial_end * 1000)
-            : null,
-        },
-      });
-    }
+        break;
+      }
 
-    /* payment failed */
-    if (event.type === "invoice.payment_failed") {
-      const invoice = event.data.object as Stripe.Invoice;
-      const customerId =
-        typeof invoice.customer === "string"
-          ? invoice.customer
-          : invoice.customer?.id;
+      case "invoice.payment_failed": {
+        const invoice = event.data.object as Stripe.Invoice;
+        const customerId =
+          typeof invoice.customer === "string"
+            ? invoice.customer
+            : invoice.customer?.id;
 
-      if (!customerId) return NextResponse.json({ received: true });
+        if (!customerId) break;
 
-      await prisma.userAccess.updateMany({
-        where: { stripeCustomerId: customerId },
-        data: { subscriptionStatus: "past_due" },
-      });
-    }
+        await prisma.userAccess.updateMany({
+          where: { stripeCustomerId: customerId },
+          data: { subscriptionStatus: "past_due" },
+        });
 
-    /* subscription canceled */
-    if (event.type === "customer.subscription.deleted") {
-      const sub = event.data.object as Stripe.Subscription;
-      const customerId = sub.customer as string | null;
-      if (!customerId) return NextResponse.json({ received: true });
+        break;
+      }
 
-      const access = await findAccessByCustomer(customerId);
-      if (!access) return NextResponse.json({ received: true });
-
-      await prisma.userAccess.update({
-        where: { userId: access.userId },
-        data: {
-          subscriptionStatus: "canceled",
-          plan: "free",
-          hasUsedTrial: true,
-          trialStartedAt: null,
-          trialEndsAt: null,
-        },
-      });
+      default:
+        break;
     }
 
     return NextResponse.json({ received: true });
