@@ -1,3 +1,4 @@
+// app/api/stripe/cancel/route.ts
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
 import { auth } from "@clerk/nextjs/server";
@@ -15,21 +16,26 @@ export async function POST() {
 
   const access = await prisma.userAccess.findUnique({ where: { userId } });
   if (!access?.stripeSubscriptionId) {
-    return NextResponse.json({ ok: false, error: "No subscription" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "No subscription" },
+      { status: 400 }
+    );
   }
 
-  // ✅ This cancels immediately (ends trial immediately too)
-  const sub = await stripe.subscriptions.cancel(access.stripeSubscriptionId);
+  // cancel immediately
+  await stripe.subscriptions.cancel(access.stripeSubscriptionId);
 
-  // ✅ Update your DB right away so UI flips instantly
+  // immediately downgrade locally so UI flips instantly
   await prisma.userAccess.update({
     where: { userId },
     data: {
-      subscriptionStatus: sub.status as any,
+      subscriptionStatus: "canceled",
       plan: "free",
       stripeSubscriptionId: null,
       stripePriceId: null,
       currentPeriodEnd: null,
+      trialStartedAt: null,
+      trialEndsAt: null,
     },
   });
 

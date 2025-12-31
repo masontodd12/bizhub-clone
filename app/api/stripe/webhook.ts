@@ -1,3 +1,4 @@
+// app/api/stripe/webhook.ts
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
 import { prisma } from "@/src/lib/prisma";
@@ -31,7 +32,6 @@ function effectiveAppPlan(sub: Stripe.Subscription, priceId?: string | null) {
 }
 
 function effectiveAppStatus(sub: Stripe.Subscription) {
-  // If they scheduled cancellation, treat as canceled in YOUR app
   if ((sub as any).cancel_at_period_end) return "canceled";
 
   if (sub.status === "active" || sub.status === "trialing") return "active";
@@ -53,7 +53,14 @@ async function findAccessByCustomer(customerId: string) {
   });
 }
 
-async function upsertFromSubscription(customerId: string, sub: Stripe.Subscription) {
+/**
+ * Sync plan/status/period dates from a subscription.
+ * IMPORTANT: does NOT touch hasUsedTrial.
+ */
+async function upsertFromSubscription(
+  customerId: string,
+  sub: Stripe.Subscription
+) {
   const access = await findAccessByCustomer(customerId);
   if (!access) return;
 
@@ -64,9 +71,10 @@ async function upsertFromSubscription(customerId: string, sub: Stripe.Subscripti
 
   const trialStart = (sub as any).trial_start as number | null | undefined;
   const trialEnd = (sub as any).trial_end as number | null | undefined;
-
-  // TS-safe: Stripe returns this, but some typings miss it
-  const currentPeriodEnd = (sub as any).current_period_end as number | null | undefined;
+  const currentPeriodEnd = (sub as any).current_period_end as
+    | number
+    | null
+    | undefined;
 
   await prisma.userAccess.update({
     where: { userId: access.userId },
@@ -75,7 +83,6 @@ async function upsertFromSubscription(customerId: string, sub: Stripe.Subscripti
       stripePriceId: priceId,
       subscriptionStatus,
       plan,
-      hasUsedTrial: true,
 
       trialStartedAt:
         plan === "free"
@@ -83,6 +90,7 @@ async function upsertFromSubscription(customerId: string, sub: Stripe.Subscripti
           : trialStart
           ? new Date(trialStart * 1000)
           : null,
+
       trialEndsAt:
         plan === "free"
           ? null
@@ -122,6 +130,7 @@ export async function POST(req: Request) {
   try {
     switch (event.type) {
       case "checkout.session.completed": {
+        // Can occur before money moves (esp trials). Just sync.
         const session = event.data.object as Stripe.Checkout.Session;
         const customerId = session.customer as string | null;
         const subscriptionId = session.subscription as string | null;
@@ -141,7 +150,6 @@ export async function POST(req: Request) {
         const customerId = sub.customer as string | null;
         if (!customerId) break;
 
-        // Ensure we have price expanded when Stripe sends minimal payloads
         const fullSub = await stripe.subscriptions.retrieve(sub.id, {
           expand: ["items.data.price"],
         });
@@ -163,12 +171,52 @@ export async function POST(req: Request) {
           data: {
             subscriptionStatus: "canceled",
             plan: "free",
-            hasUsedTrial: true,
             trialStartedAt: null,
             trialEndsAt: null,
             stripePriceId: null,
             stripeSubscriptionId: null,
             currentPeriodEnd: null,
+            // IMPORTANT: do NOT touch hasUsedTrial here
+          },
+        });
+
+        break;
+      }
+
+      case "invoice.payment_succeeded": {
+        // ✅ Flip hasUsedTrial ONLY when payment succeeds
+        const invoice = event.data.object as Stripe.Invoice;
+
+        const customerId =
+          typeof invoice.customer === "string"
+            ? invoice.customer
+            : invoice.customer?.id;
+
+        // Typings issue with your Stripe apiVersion — cast to any.
+        const subscriptionId = (invoice as any).subscription as string | null;
+
+        // Only proceed for subscription invoices
+        if (!customerId || !subscriptionId) break;
+
+        const access = await findAccessByCustomer(customerId);
+        if (!access) break;
+
+        const sub = await stripe.subscriptions.retrieve(subscriptionId, {
+          expand: ["items.data.price"],
+        });
+
+        const priceId = sub.items?.data?.[0]?.price?.id ?? null;
+        const plan = effectiveAppPlan(sub, priceId);
+        const subscriptionStatus = effectiveAppStatus(sub);
+
+        await prisma.userAccess.update({
+          where: { userId: access.userId },
+          data: {
+            hasUsedTrial: true, // ✅ burned forever after first successful pay
+            plan,
+            subscriptionStatus,
+            stripeSubscriptionId: sub.id,
+            stripePriceId: priceId,
           },
         });
 
@@ -177,6 +225,7 @@ export async function POST(req: Request) {
 
       case "invoice.payment_failed": {
         const invoice = event.data.object as Stripe.Invoice;
+
         const customerId =
           typeof invoice.customer === "string"
             ? invoice.customer

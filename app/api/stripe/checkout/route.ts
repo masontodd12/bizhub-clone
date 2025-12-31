@@ -18,18 +18,14 @@ function getPriceId(plan: Plan) {
 }
 
 function getBaseUrl(req: Request) {
-  // Prefer explicit env var (best for Stripe redirect URLs)
   const envUrl =
     process.env.NEXT_PUBLIC_APP_URL ||
     process.env.APP_URL ||
     process.env.VERCEL_PROJECT_PRODUCTION_URL ||
     process.env.VERCEL_URL;
 
-  if (envUrl) {
-    return envUrl.startsWith("http") ? envUrl : `https://${envUrl}`;
-  }
+  if (envUrl) return envUrl.startsWith("http") ? envUrl : `https://${envUrl}`;
 
-  // Fallback: derive from headers (works local + Vercel)
   const host = req.headers.get("host");
   const proto = req.headers.get("x-forwarded-proto") || "http";
   if (!host) throw new Error("Missing host header to build base URL");
@@ -55,7 +51,7 @@ export async function GET(req: Request) {
   const plan = planParam as Plan;
   const priceId = getPriceId(plan);
 
-  // 3) Build safe absolute URLs for Stripe
+  // 3) Base URL
   const baseUrl = getBaseUrl(req);
 
   // 4) Ensure access row exists
@@ -65,9 +61,17 @@ export async function GET(req: Request) {
     create: { userId },
   });
 
-  // 5) Ensure Stripe customer exists
-  let customerId = access.stripeCustomerId;
+  // ✅ Guard: if already active/trialing, send them to billing portal instead of creating another sub
+  if (
+    (access.plan === "pro" || access.plan === "pro_plus") &&
+    (access.subscriptionStatus === "active" || access.subscriptionStatus === "trialing") &&
+    access.stripeSubscriptionId
+  ) {
+    return NextResponse.redirect(new URL("/account/billing", baseUrl));
+  }
 
+  // 5) Ensure Stripe customer exists (REUSE always)
+  let customerId = access.stripeCustomerId;
   if (!customerId) {
     const customer = await stripe.customers.create({
       metadata: { userId },
@@ -82,23 +86,23 @@ export async function GET(req: Request) {
   }
 
   // 6) Create checkout session
+  const subscription_data: Stripe.Checkout.SessionCreateParams.SubscriptionData =
+    {
+      metadata: { userId },
+    };
+
+  // ✅ Only allow trial if they haven't used it
+  if (!access.hasUsedTrial) {
+    subscription_data.trial_period_days = 3;
+  }
+
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
     customer: customerId,
     line_items: [{ price: priceId, quantity: 1 }],
     payment_method_collection: "always",
-
-    subscription_data: {
-      metadata: { userId },
-      ...(access.hasUsedTrial ? {} : { trial_period_days: 3 }),
-    },
-
-    metadata: {
-      userId,
-      plan,
-    },
-
-    // ✅ MUST include {CHECKOUT_SESSION_ID}
+    subscription_data,
+    metadata: { userId, plan },
     success_url: `${baseUrl}/account/billing/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/pricing`,
   });
