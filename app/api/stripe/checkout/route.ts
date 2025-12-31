@@ -61,10 +61,11 @@ export async function GET(req: Request) {
     create: { userId },
   });
 
-  // ✅ Guard: if already active/trialing, send them to billing portal instead of creating another sub
+  // ✅ Guard: if already active/trialing, send them to billing page instead of creating another sub
   if (
     (access.plan === "pro" || access.plan === "pro_plus") &&
-    (access.subscriptionStatus === "active" || access.subscriptionStatus === "trialing") &&
+    (access.subscriptionStatus === "active" ||
+      access.subscriptionStatus === "trialing") &&
     access.stripeSubscriptionId
   ) {
     return NextResponse.redirect(new URL("/account/billing", baseUrl));
@@ -91,8 +92,11 @@ export async function GET(req: Request) {
       metadata: { userId },
     };
 
-  // ✅ Only allow trial if they haven't used it
-  if (!access.hasUsedTrial) {
+  // ✅ Only allow trial if they haven't used it OR ever been trialing
+  const usedTrial =
+    access.hasUsedTrial || access.subscriptionStatus === "trialing";
+
+  if (!usedTrial) {
     subscription_data.trial_period_days = 3;
   }
 

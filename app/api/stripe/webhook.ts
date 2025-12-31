@@ -31,7 +31,7 @@ function effectiveAppPlan(sub: Stripe.Subscription, priceId?: string | null) {
   return planFromPriceId(priceId);
 }
 
-// ✅ FIXED: preserve "trialing" (your enum includes it)
+// ✅ preserve trialing
 function effectiveAppStatus(sub: Stripe.Subscription) {
   if ((sub as any).cancel_at_period_end) return "canceled";
 
@@ -99,10 +99,7 @@ async function upsertFromSubscription(
       subscriptionStatus,
       plan,
 
-      // ✅ keep trial dates if Stripe has them
-      trialStartedAt:
-        hasTrial && trialStart ? new Date(trialStart * 1000) : null,
-
+      trialStartedAt: hasTrial && trialStart ? new Date(trialStart * 1000) : null,
       trialEndsAt: hasTrial && trialEnd ? new Date(trialEnd * 1000) : null,
 
       currentPeriodEnd:
@@ -112,7 +109,7 @@ async function upsertFromSubscription(
           ? new Date(currentPeriodEnd * 1000)
           : null,
 
-      // ✅ burn trial immediately once granted
+      // ✅ Burn trial as soon as Stripe grants it (trialing counts)
       hasUsedTrial: access.hasUsedTrial ? true : hasTrial ? true : false,
     },
   });
@@ -185,7 +182,7 @@ export async function POST(req: Request) {
             stripePriceId: null,
             stripeSubscriptionId: null,
             currentPeriodEnd: null,
-            // IMPORTANT: do NOT set hasUsedTrial false here
+            // ✅ do NOT reset hasUsedTrial
           },
         });
 
@@ -215,7 +212,7 @@ export async function POST(req: Request) {
         await prisma.userAccess.update({
           where: { userId: access.userId },
           data: {
-            hasUsedTrial: true, // harmless redundancy
+            hasUsedTrial: true,
             plan: effectiveAppPlan(sub, priceId),
             subscriptionStatus: effectiveAppStatus(sub),
             stripeSubscriptionId: sub.id,
