@@ -2,7 +2,14 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
-// ✅ Data should be PUBLIC now (so DO NOT include /data here)
+const isAuthRoute = createRouteMatcher(["/login(.*)", "/signup(.*)"]);
+const isPublicRoute = createRouteMatcher([
+  "/",
+  "/pricing(.*)",
+  "/sso-callback(.*)",      // ✅ IMPORTANT
+  "/api/stripe/webhook(.*)" // ✅ webhook must stay public
+]);
+
 const isProtectedRoute = createRouteMatcher([
   "/deal-calculator(.*)",
   "/cim-analyzer(.*)",
@@ -12,14 +19,18 @@ const isProtectedRoute = createRouteMatcher([
 
 export default clerkMiddleware(async (auth, req) => {
   const { userId } = await auth();
-  const path = req.nextUrl.pathname;
 
-  // Keep signed-in users out of /login and /signup
-  if (userId && (path === "/login" || path === "/signup")) {
+  // ✅ If logged in, keep them out of auth pages (including nested)
+  if (userId && isAuthRoute(req)) {
     return NextResponse.redirect(new URL("/", req.url));
   }
 
-  // Protect routes
+  // ✅ Never protect auth/public routes
+  if (isAuthRoute(req) || isPublicRoute(req)) {
+    return NextResponse.next();
+  }
+
+  // ✅ Protect app-only routes
   if (isProtectedRoute(req)) {
     await auth.protect();
   }
