@@ -36,25 +36,21 @@ export default function PlanStatus() {
           credentials: "include",
         });
       } catch {
-        return; // network / offline
-      }
-
-      if (!res.ok) {
-        // Not logged in yet (normal during hydration)
         return;
       }
+
+      if (!res.ok) return;
 
       let json: AccessResponse;
       try {
         json = await res.json();
       } catch {
-        return; // non-JSON / empty body
+        return;
       }
 
       if (!json.ok || cancelled) return;
 
-      const used =
-        json.entitlements?.limits?.dealAnalyze?.usedToday ?? 0;
+      const used = json.entitlements?.limits?.dealAnalyze?.usedToday ?? 0;
 
       setData({
         plan: json.plan,
@@ -75,7 +71,8 @@ export default function PlanStatus() {
 
   return (
     <Link
-      href="/billing"
+      href="/api/billing-portal"
+      prefetch={false}
       className="flex items-center gap-2 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs hover:bg-black/[0.03]"
       title="Manage subscription"
     >
@@ -86,6 +83,8 @@ export default function PlanStatus() {
       <span className="text-black/60">
         {data.dailyDealCount} / {limit}
       </span>
+
+      <span className="text-black/40">Manage</span>
     </Link>
   );
 }
