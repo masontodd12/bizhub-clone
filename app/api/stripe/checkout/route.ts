@@ -12,9 +12,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 type Plan = "pro" | "pro_plus";
 
+// ✅ Fallbacks you provided (so code works even if env isn't set yet)
+const FALLBACK_PRICE_PRO = "price_1Sku9ODCX5T1Us35TMjxLTqF";
+const FALLBACK_PRICE_PRO_PLUS = "price_1Sku5TDCX5T1Us35B1gGydn9";
+
 function getPriceId(plan: Plan) {
-  if (plan === "pro") return process.env.STRIPE_PRICE_PRO!;
-  return process.env.STRIPE_PRICE_PRO_PLUS!;
+  if (plan === "pro") return process.env.STRIPE_PRICE_PRO || FALLBACK_PRICE_PRO;
+  return process.env.STRIPE_PRICE_PRO_PLUS || FALLBACK_PRICE_PRO_PLUS;
 }
 
 function getBaseUrl(req: Request) {
@@ -111,5 +115,12 @@ export async function GET(req: Request) {
     cancel_url: `${baseUrl}/pricing`,
   });
 
-  return NextResponse.redirect(session.url!, { status: 303 });
+  if (!session.url) {
+    return NextResponse.json(
+      { error: "Stripe session missing URL" },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.redirect(session.url, { status: 303 });
 }

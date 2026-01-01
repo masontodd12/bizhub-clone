@@ -4,22 +4,53 @@
 import Link from "next/link";
 import { useUser } from "@clerk/nextjs";
 
+function moneyFromEnv(v: string | undefined, fallback: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export default function PricingPage() {
   const { isLoaded, isSignedIn } = useUser();
+
+  // ✅ UI display prices (billing still handled by Stripe price IDs on server)
+  const proPrice = moneyFromEnv(
+    process.env.NEXT_PUBLIC_PRICE_PRO_MONTHLY,
+    9.99
+  );
+
+  const proPlusPrice = moneyFromEnv(
+    process.env.NEXT_PUBLIC_PRICE_PRO_PLUS_MONTHLY,
+    14.99
+  );
+
+  const proCheckoutPath = "/api/stripe/checkout?plan=pro";
+  const proPlusCheckoutPath = "/api/stripe/checkout?plan=pro_plus";
+
+  // ✅ URL-encode redirect_url (important)
+  const proSignupHref = `/signup?redirect_url=${encodeURIComponent(
+    proCheckoutPath
+  )}`;
+  const proPlusSignupHref = `/signup?redirect_url=${encodeURIComponent(
+    proPlusCheckoutPath
+  )}`;
 
   const proHref = !isLoaded
     ? "/pricing"
     : isSignedIn
-    ? "/api/stripe/checkout?plan=pro"
-    : "/signup?redirect_url=/api/stripe/checkout?plan=pro";
+    ? proCheckoutPath
+    : proSignupHref;
 
   const proPlusHref = !isLoaded
     ? "/pricing"
     : isSignedIn
-    ? "/api/stripe/checkout?plan=pro_plus"
-    : "/signup?redirect_url=/api/stripe/checkout?plan=pro_plus";
+    ? proPlusCheckoutPath
+    : proPlusSignupHref;
 
-  const ctaText = !isLoaded ? "Loading…" : isSignedIn ? "Start" : "Create account to start";
+  const ctaText = !isLoaded
+    ? "Loading…"
+    : isSignedIn
+    ? "Start"
+    : "Create account to start";
 
   return (
     <main className="min-h-screen bg-[#F7F8F6] text-[#111827] px-6 py-12">
@@ -27,8 +58,8 @@ export default function PricingPage() {
         {/* Header */}
         <h1 className="text-3xl font-extrabold tracking-tight">Pricing</h1>
         <p className="mt-2 max-w-2xl text-black/60">
-          Professional underwriting tools for buyers and investors.
-          Choose a plan based on how fast you analyze deals.
+          Professional underwriting tools for buyers and investors. Choose a
+          plan based on how fast you analyze deals.
         </p>
 
         {/* Pricing Cards */}
@@ -43,7 +74,9 @@ export default function PricingPage() {
             </div>
 
             <div className="mt-2 flex items-end gap-1">
-              <span className="text-3xl font-extrabold">$19</span>
+              <span className="text-3xl font-extrabold">
+                ${proPrice.toFixed(2)}
+              </span>
               <span className="text-sm text-black/60">/ month</span>
             </div>
 
@@ -55,7 +88,7 @@ export default function PricingPage() {
               <li>• Full Deal Calculator</li>
               <li>• Advanced metrics (DSCR, IRR, cash-on-cash)</li>
               <li>• CIM Analyzer (3 per day)</li>
-              <li>• AI deal insights & risk flags</li>
+              <li>• AI deal insights &amp; risk flags</li>
               <li>• Unlimited saved deals</li>
               <li>• PDF exports</li>
             </ul>
@@ -85,7 +118,9 @@ export default function PricingPage() {
             </div>
 
             <div className="mt-2 flex items-end gap-1">
-              <span className="text-3xl font-extrabold">$49</span>
+              <span className="text-3xl font-extrabold">
+                ${proPlusPrice.toFixed(2)}
+              </span>
               <span className="text-sm text-black/60">/ month</span>
             </div>
 
@@ -98,7 +133,7 @@ export default function PricingPage() {
               <li>• CIM Analyzer (10 per day)</li>
               <li>• Full 5-year projections</li>
               <li>• Scenario modeling (base / downside / upside)</li>
-              <li>• Capital stack & ownership modeling</li>
+              <li>• Capital stack &amp; ownership modeling</li>
               <li>• Priority access to new tools</li>
             </ul>
 
@@ -115,9 +150,8 @@ export default function PricingPage() {
         </div>
 
         <p className="mt-8 text-sm text-black/50">
-          One deal = one full analysis.
-          Pro includes 3 analyses per day.
-          Pro Plus includes unlimited deal analysis and up to 10 CIM analyses per day.
+          One deal = one full analysis. Pro includes 3 analyses per day. Pro Plus
+          includes unlimited deal analysis and up to 10 CIM analyses per day.
           Limits reset daily at midnight.
         </p>
       </div>
