@@ -25,20 +25,18 @@ export async function GET() {
 
   const ent = getEntitlements(access);
 
-  // ❌ Free users see nothing
+  // Free users
   if (!ent.isPro && !ent.isProPlus && !ent.isAdmin) {
     return NextResponse.json({ enabled: false });
   }
 
-  // ✅ Limits
-  const dailyLimit =
-    ent.isProPlus || ent.isAdmin
-      ? Infinity
-      : 3; // 👈 PRO = 3/day
+  // Pro+ (or admin) is unlimited
+  const unlimited = ent.isProPlus || ent.isAdmin;
+  const dailyLimit: number | null = unlimited ? null : 3;
 
   const today = todayUTCStart();
 
-  // Ensure row exists (safe upsert)
+  // Ensure row exists
   await prisma.$executeRaw`
     INSERT INTO "DealUsage" ("id","userId","date","count","createdAt","updatedAt")
     VALUES (gen_random_uuid()::text, ${userId}, ${today}, 0, NOW(), NOW())
@@ -55,21 +53,20 @@ export async function GET() {
 
   const countToday = rows?.[0]?.count ?? 0;
 
-  const remaining =
-    dailyLimit === Infinity
-      ? Infinity
-      : Math.max(0, dailyLimit - countToday);
+  // IMPORTANT: do NOT return Infinity in JSON
+  const remaining: number | null =
+    dailyLimit === null ? null : Math.max(0, dailyLimit - countToday);
 
   const pctUsed =
-    dailyLimit === Infinity
+    dailyLimit === null
       ? 0
       : Math.min(100, Math.round((countToday / dailyLimit) * 100));
 
   return NextResponse.json({
     enabled: true,
     countToday,
-    dailyLimit: dailyLimit === Infinity ? null : dailyLimit,
-    remaining,
+    dailyLimit,  // null => unlimited
+    remaining,   // null => unlimited
     pctUsed,
   });
 }

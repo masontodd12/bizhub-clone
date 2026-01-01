@@ -1,0 +1,333 @@
+*** Begin Patch
+*** Update File: app/deal-calculator/DealCalculatorClient.tsx
+@@
+ "use client";
+ 
+ import React, { useEffect, useMemo, useState } from "react";
+ import { useRouter } from "next/navigation";
+ import { useUser } from "@clerk/nextjs";
+@@
+ type ProjectionResponse = {
+   ok: boolean;
+   rows: ProjRow[];
+   breakEvenYear: number | null;
+   paybackYears: number | null;
+   ai: AiDealSummary | null;
+   aiError: string | null;
+   error?: string;
+   code?: string; // e.g. "DAILY_LIMIT"
+ };
+@@
+ export default function DealCalculatorClient() {
+   const router = useRouter();
+   const { user, isLoaded } = useUser();
+@@
+   const [projLoading, setProjLoading] = useState(false);
+   const [projError, setProjError] = useState<string | null>(null);
+   const [projLocked, setProjLocked] = useState(false);
+   const [limitHit, setLimitHit] = useState(false);
+   const [projData, setProjData] = useState<{
+     rows: ProjRow[];
+     breakEvenYear: number | null;
+     paybackYears: number | null;
+     analyzedAt: string;
+   } | null>(null);
+ 
+-  // ✅ NEW: AI summary state
+-  const [aiLoading, setAiLoading] = useState(false);
++  // ✅ AI summary state (now returned from /api/deal-calculator/analyze)
+   const [aiError, setAiError] = useState<string | null>(null);
+   const [aiSummary, setAiSummary] = useState<AiDealSummary | null>(null);
+@@
+   const canAnalyze = useMemo(() => {
+     if (!accessLoaded) return false;
+     if (!canAnalyzeDeal) return false;
+-    if (projLoading || usageLoading || aiLoading) return false;
++    if (projLoading || usageLoading) return false;
+     if (atLimit) return false;
+     if (!deal.askingPrice || !deal.sde) return false;
+     return true;
+   }, [
+     accessLoaded,
+     canAnalyzeDeal,
+     projLoading,
+     usageLoading,
+-    aiLoading,
+     atLimit,
+     deal.askingPrice,
+     deal.sde,
+   ]);
+ 
+-  // ✅ NEW: AI analyze call (1–10 score + weaknesses + summary)
+-  async function handleAiAnalyzeDeal() {
+-    setAiError(null);
+-
+-    // keep same gating
+-    if (!accessLoaded) return;
+-    if (!canAnalyzeDeal) return;
+-
+-    if (atLimit) {
+-      setAiSummary(null);
+-      setAiError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
+-      return;
+-    }
+-
+-    if (!deal.askingPrice || !deal.sde) {
+-      setAiSummary(null);
+-      setAiError("Enter at least Asking Price + SDE.");
+-      return;
+-    }
+-
+-    setAiLoading(true);
+-
+-    try {
+-      const payload = {
+-        industry: deal.industry || "Unknown",
+-        askingPrice: deal.askingPrice ?? 0,
+-        revenue: deal.revenue ?? 0,
+-        sde: results.sdeAdjusted ?? 0,
+-
+-        financingMode: deal.financingMode,
+-        loanTermYears: deal.loanTermYears,
+-        interestRatePct: deal.interestRatePct,
+-        closingCosts: deal.closingCosts ?? 0,
+-        includeClosingInLoan: deal.includeClosingInLoan,
+-        downPaymentPct: deal.downPaymentPct,
+-
+-        // computed KPIs (help the model)
+-        cashflowMultiple: results.cfMultiple ?? null,
+-        revenueMultiple: results.revMultiple ?? null,
+-        profitMarginPct: results.margin === null ? null : results.margin * 100,
+-        dscr: results.dscr ?? null,
+-        annualDebtService: results.annualDebt ?? 0,
+-        upfrontCash: results.upfrontCash ?? 0,
+-
+-        // benchmarks (optional)
+-        benchmark: bench
+-          ? {
+-              price_to_sde_multiple: bench.price_to_sde_multiple ?? null,
+-              price_to_revenue_multiple: bench.price_to_revenue_multiple ?? null,
+-              cashflow_margin_pct: bench.cashflow_margin_pct ?? null,
+-              median_sde: bench.median_sde ?? null,
+-              median_revenue: bench.median_revenue ?? null,
+-              median_asking_price: bench.median_asking_price ?? null,
+-            }
+-          : null,
+-      };
+-
+-      const r = await fetch("/api/deal-calculator/ai-summary", {
+-        method: "POST",
+-        headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify(payload),
+-      });
+-
+-      if (r.status === 403) {
+-        setAiSummary(null);
+-        setAiError("Upgrade to Pro to analyze deals.");
+-        await refreshUsage();
+-        return;
+-      }
+-
+-      const data = (await r.json()) as AiDealSummary & { error?: string; code?: string };
+-
+-      if (!r.ok) {
+-        if (data?.code === "DAILY_LIMIT" || r.status === 429) {
+-          setAiSummary(null);
+-          setAiError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
+-          await refreshUsage();
+-          return;
+-        }
+-        throw new Error(data?.error ?? `AI analyze failed (${r.status})`);
+-      }
+-
+-      // clamp score
+-      const score = Math.max(1, Math.min(10, Math.round(Number(data.score ?? 1))));
+-      const topWeaknesses = Array.isArray(data.topWeaknesses) ? data.topWeaknesses.slice(0, 5) : [];
+-      const summary = String(data.summary ?? "");
+-
+-      setAiSummary({ score, topWeaknesses, summary });
+-      await refreshUsage();
+-    } catch (e: any) {
+-      setAiSummary(null);
+-      setAiError(String(e?.message ?? "AI analyze failed"));
+-      await refreshUsage();
+-    } finally {
+-      setAiLoading(false);
+-    }
+-  }
+-
+   async function handleAnalyze() {
+     if (!accessLoaded) return;
+ 
+     setProjError(null);
+     setLimitHit(false);
++    setAiError(null);
+ 
+     if (!canAnalyzeDeal) {
+       setProjLocked(true);
+       setProjData(null);
++      setAiSummary(null);
+       return;
+     }
+ 
+     if (atLimit) {
+       setLimitHit(true);
+       setProjError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
++      setAiSummary(null);
++      setAiError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
+       return;
+     }
+ 
+     setProjLoading(true);
+     setProjLocked(false);
+ 
+     const body = {
+-      sdeYear1: results.sdeAdjusted ?? 0,
+-      annualDebt: results.annualDebt,
+-      upfrontCash: results.upfrontCash,
+-      years: 5,
+-      sdeGrowthPct: deal.projSdeGrowthPct,
+-      capexAnnual: deal.projCapexAnnual,
+-      taxRatePct: deal.projTaxRatePct,
++      // ===== projection inputs =====
++      sdeYear1: results.sdeAdjusted ?? 0,
++      annualDebt: results.annualDebt ?? 0,
++      upfrontCash: results.upfrontCash ?? 0,
++      years: 5,
++      sdeGrowthPct: deal.projSdeGrowthPct ?? 0,
++      capexAnnual: deal.projCapexAnnual ?? 0,
++      taxRatePct: deal.projTaxRatePct ?? 0,
++
++      // ===== AI context (NEW) =====
++      industry: deal.industry || "Unknown",
++      listingUrl: deal.listingUrl || "",
++
++      askingPrice: deal.askingPrice ?? 0,
++      revenue: deal.revenue ?? 0,
++      sdeAdjusted: results.sdeAdjusted ?? 0,
++
++      cashflowMultiple: results.cfMultiple ?? null,
++      revenueMultiple: results.revMultiple ?? null,
++      profitMarginPct: results.margin === null ? null : results.margin * 100,
++      dscr: results.dscr ?? null,
++
++      benchmark: bench
++        ? {
++            price_to_sde_multiple: bench.price_to_sde_multiple ?? null,
++            price_to_revenue_multiple: bench.price_to_revenue_multiple ?? null,
++            cashflow_margin_pct: bench.cashflow_margin_pct ?? null,
++            median_sde: bench.median_sde ?? null,
++            median_revenue: bench.median_revenue ?? null,
++            median_asking_price: bench.median_asking_price ?? null,
++          }
++        : null,
+     };
+ 
+     try {
+       const r = await fetch("/api/deal-calculator/analyze", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify(body),
+       });
+ 
+       if (r.status === 403) {
+         setProjLocked(true);
+         setProjData(null);
++        setAiSummary(null);
++        setAiError("Upgrade to Pro to analyze deals.");
+         await refreshUsage();
+         return;
+       }
+ 
+       const data = (await r.json()) as ProjectionResponse;
+ 
+       if (!r.ok) {
+         if (data?.code === "DAILY_LIMIT" || r.status === 429) {
+           setLimitHit(true);
+           setProjData(null);
+           setProjError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
++          setAiSummary(null);
++          setAiError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
+           await refreshUsage();
+           return;
+         }
+         throw new Error(data?.error ?? `Projection failed (${r.status})`);
+       }
+ 
+       setProjLocked(false);
+       setProjData({
+         rows: data.rows ?? [],
+         breakEvenYear: data.breakEvenYear ?? null,
+         paybackYears: data.paybackYears ?? null,
+         analyzedAt: new Date().toISOString(),
+       });
+ 
++      // ✅ AI comes back in the same response now
++      setAiSummary(data.ai ?? null);
++      setAiError(data.aiError ?? null);
++
+       setLastAnalyzedSnapshot(currentSnapshot);
+       await refreshUsage();
+     } catch (e: any) {
+       setProjError(String(e?.message ?? "Projection failed"));
+       setProjData(null);
++
++      setAiSummary(null);
++      setAiError(String(e?.message ?? "AI analyze failed"));
++
+       await refreshUsage();
+     } finally {
+       setProjLoading(false);
+     }
+   }
+@@
+-  // ✅ single click runs both (projection + AI summary)
+-  async function handleAnalyzeAll() {
+-    // run both in parallel
+-    await Promise.all([handleAnalyze(), handleAiAnalyzeDeal()]);
+-  }
+-
+   return (
+     <main className="min-h-screen bg-[#F7F8F6] text-[#111827]">
+@@
+                 <button
+-                  onClick={handleAnalyzeAll}
++                  onClick={handleAnalyze}
+                   disabled={!canAnalyze}
+                   className="rounded-2xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-[#3F7668] disabled:opacity-60 disabled:hover:bg-[#2F5D50]"
+@@
+                 >
+-                  {projLoading || aiLoading ? "Analyzing…" : "Analyze"}
++                  {projLoading ? "Analyzing…" : "Analyze"}
+                 </button>
+@@
+                     <button
+-                      onClick={handleAnalyzeAll}
++                      onClick={handleAnalyze}
+                       disabled={!canAnalyze}
+                       className="mt-5 rounded-xl bg-[#2F5D50] px-5 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-[#3F7668] disabled:opacity-60"
+                     >
+-                      {projLoading || aiLoading ? "Analyzing…" : "Analyze Deal"}
++                      {projLoading ? "Analyzing…" : "Analyze Deal"}
+                     </button>
+@@
+                     <button
+-                      onClick={handleAnalyzeAll}
++                      onClick={handleAnalyze}
+                       disabled={!canAnalyze}
+                       className="flex-1 rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668] disabled:opacity-60"
+                     >
+-                      {projLoading || aiLoading ? "Analyzing…" : "Re-Analyze"}
++                      {projLoading ? "Analyzing…" : "Re-Analyze"}
+                     </button>
+@@
+                 <button
+-                  onClick={handleAnalyzeAll}
++                  onClick={handleAnalyze}
+                   disabled={!canAnalyze}
+                   className="w-full rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668] disabled:opacity-60"
+                 >
+-                  {projLoading || aiLoading ? "Analyzing…" : "Analyze (counts toward limit)"}
++                  {projLoading ? "Analyzing…" : "Analyze (counts toward limit)"}
+                 </button>
+*** End Patch

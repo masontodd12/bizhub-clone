@@ -1,4 +1,3 @@
-
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -66,6 +65,8 @@ type ProjectionResponse = {
   rows: ProjRow[];
   breakEvenYear: number | null;
   paybackYears: number | null;
+  ai: AiDealSummary | null;
+  aiError: string | null;
   error?: string;
   code?: string; // e.g. "DAILY_LIMIT"
 };
@@ -76,6 +77,13 @@ type UsageResp = {
   dailyLimit: number | null; // null => unlimited (Pro+ maybe)
   countToday: number;
   remaining: number | null; // null => unlimited
+};
+
+// ✅ AI Summary response
+type AiDealSummary = {
+  score: number; // integer 1-10
+  topWeaknesses: string[]; // 3-5 bullets
+  summary: string; // short paragraph
 };
 
 const YEARS = [2024, 2023, 2022, 2021, 2020, 2019, 2018] as const;
@@ -291,7 +299,7 @@ export default function DealCalculatorClient() {
   const [canUse5YearProjection, setCanUse5YearProjection] = useState(false); // Pro+ only
   const [accessLoaded, setAccessLoaded] = useState(false);
 
-  // usage (disable analyze when at limit)
+  // usage (USED ONLY FOR SERVER PROJECTION LIMITS)
   const [usage, setUsage] = useState<UsageResp | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
 
@@ -318,6 +326,11 @@ export default function DealCalculatorClient() {
     paybackYears: number | null;
     analyzedAt: string;
   } | null>(null);
+
+  // AI summary state
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSummary, setAiSummary] = useState<AiDealSummary | null>(null);
 
   useEffect(() => {
     fetch("/api/me/access")
@@ -460,22 +473,126 @@ export default function DealCalculatorClient() {
     return lastAnalyzedSnapshot !== currentSnapshot;
   }, [projData, lastAnalyzedSnapshot, currentSnapshot]);
 
-  const isUnlimited = usage?.dailyLimit === null;
-  const dailyLimit = usage?.dailyLimit ?? 3;
-  const countToday = usage?.countToday ?? 0;
-  const atLimit = !!usage?.enabled && !isUnlimited && countToday >= dailyLimit;
+  // ==========================
+  // LIMIT LOGIC (projection only)
+  // ==========================
+  const projIsUnlimited = usage?.dailyLimit === null;
+  const projDailyLimit = usage?.dailyLimit ?? 3;
+  const projCountToday = usage?.countToday ?? 0;
+  const projAtLimit = !!usage?.enabled && !projIsUnlimited && projCountToday >= projDailyLimit;
 
-  // ✅ Analyze is allowed for Pro OR Pro+
+  // ✅ Analyze button gate:
+  // - must have Pro/Pro+
+  // - must have Asking Price + SDE
+  // - must not be loading
+  // - BUT: we DO NOT block if projection is at limit, because Pro still gets unlimited AI.
+  //   (we’ll run AI regardless and skip projection if limited)
   const canAnalyze = useMemo(() => {
     if (!accessLoaded) return false;
     if (!canAnalyzeDeal) return false;
-    if (projLoading || usageLoading) return false;
-    if (atLimit) return false;
+    if (projLoading || usageLoading || aiLoading) return false;
     if (!deal.askingPrice || !deal.sde) return false;
     return true;
-  }, [accessLoaded, canAnalyzeDeal, projLoading, usageLoading, atLimit, deal.askingPrice, deal.sde]);
+  }, [
+    accessLoaded,
+    canAnalyzeDeal,
+    projLoading,
+    usageLoading,
+    aiLoading,
+    deal.askingPrice,
+    deal.sde,
+  ]);
 
-  async function handleAnalyze() {
+  // ✅ AI Analyze is UNLIMITED for Pro + Pro+ (no daily limit gating here)
+  async function handleAiAnalyzeDeal() {
+    setAiError(null);
+
+    if (!accessLoaded) return;
+    if (!canAnalyzeDeal) return;
+
+    if (!deal.askingPrice || !deal.sde) {
+      setAiSummary(null);
+      setAiError("Enter at least Asking Price + SDE.");
+      return;
+    }
+
+    setAiLoading(true);
+
+    try {
+      const payload = {
+        industry: deal.industry || "Unknown",
+        askingPrice: deal.askingPrice ?? 0,
+        revenue: deal.revenue ?? 0,
+        sde: results.sdeAdjusted ?? 0,
+
+        financingMode: deal.financingMode,
+        loanTermYears: deal.loanTermYears,
+        interestRatePct: deal.interestRatePct,
+        closingCosts: deal.closingCosts ?? 0,
+        includeClosingInLoan: deal.includeClosingInLoan,
+        downPaymentPct: deal.downPaymentPct,
+
+        // computed KPIs
+        cashflowMultiple: results.cfMultiple ?? null,
+        revenueMultiple: results.revMultiple ?? null,
+        profitMarginPct: results.margin === null ? null : results.margin * 100,
+        dscr: results.dscr ?? null,
+        annualDebtService: results.annualDebt ?? 0,
+        upfrontCash: results.upfrontCash ?? 0,
+
+        // benchmarks (optional)
+        benchmark: bench
+          ? {
+              price_to_sde_multiple: bench.price_to_sde_multiple ?? null,
+              price_to_revenue_multiple: bench.price_to_revenue_multiple ?? null,
+              cashflow_margin_pct: bench.cashflow_margin_pct ?? null,
+              median_sde: bench.median_sde ?? null,
+              median_revenue: bench.median_revenue ?? null,
+              median_asking_price: bench.median_asking_price ?? null,
+            }
+          : null,
+      };
+
+      const r = await fetch("/api/deal-calculator/ai-summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (r.status === 403) {
+        setAiSummary(null);
+        setAiError("Upgrade to Pro to analyze deals.");
+        return;
+      }
+
+      const data = (await r.json()) as AiDealSummary & { error?: string; code?: string };
+
+      if (!r.ok) {
+        // If your backend still sometimes returns DAILY_LIMIT, treat it as a server config issue
+        // (because we want Pro unlimited AI). Show a clear message.
+        if (data?.code === "DAILY_LIMIT" || r.status === 429) {
+          setAiSummary(null);
+          setAiError("AI analyze is temporarily rate-limited. Please try again.");
+          return;
+        }
+        throw new Error(data?.error ?? `AI analyze failed (${r.status})`);
+      }
+
+      const score = Math.max(1, Math.min(10, Math.round(Number(data.score ?? 1))));
+      const topWeaknesses = Array.isArray(data.topWeaknesses) ? data.topWeaknesses.slice(0, 5) : [];
+      const summary = String(data.summary ?? "");
+
+      setAiSummary({ score, topWeaknesses, summary });
+    } catch (e: any) {
+      setAiSummary(null);
+      setAiError(String(e?.message ?? "AI analyze failed"));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  // Projection analyze (still limited for Pro; unlimited if your usage returns null limit for Pro+)
+  async function handleAnalyzeProjection() {
     if (!accessLoaded) return;
 
     setProjError(null);
@@ -487,9 +604,9 @@ export default function DealCalculatorClient() {
       return;
     }
 
-    if (atLimit) {
+    if (projAtLimit) {
       setLimitHit(true);
-      setProjError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
+      setProjError("Projection daily limit reached. Upgrade to Pro+ for unlimited projections.");
       return;
     }
 
@@ -526,7 +643,7 @@ export default function DealCalculatorClient() {
         if (data?.code === "DAILY_LIMIT" || r.status === 429) {
           setLimitHit(true);
           setProjData(null);
-          setProjError("Daily limit reached. Upgrade to Pro+ for unlimited analyzes.");
+          setProjError("Projection daily limit reached. Upgrade to Pro+ for unlimited projections.");
           await refreshUsage();
           return;
         }
@@ -563,7 +680,6 @@ export default function DealCalculatorClient() {
     if (!isLoaded) return setSaveError("Loading your account… try again in a second.");
     if (!user?.id) return setSaveError("You must be logged in to save deals.");
 
-    // ✅ Pro users can save, but we strip projection rows unless Pro+
     const projectionForSave =
       canUse5YearProjection && projData
         ? {
@@ -585,6 +701,7 @@ export default function DealCalculatorClient() {
       computed: {
         ...results,
         projection: projectionForSave,
+        aiSummary: aiSummary,
       },
       benchmark: bench ?? null,
     };
@@ -623,8 +740,17 @@ export default function DealCalculatorClient() {
     }
   }
 
-  // ✅ Year 1 net is shown to Pro AND Pro+ (after analyze)
   const year1Net = projData?.rows?.[0]?.net ?? null;
+
+  // ✅ single click runs BOTH:
+  // - AI summary ALWAYS (Pro unlimited)
+  // - Projection ONLY if not at projection limit
+  async function handleAnalyzeAll() {
+    await Promise.all([
+      handleAiAnalyzeDeal(),
+      projAtLimit ? Promise.resolve() : handleAnalyzeProjection(),
+    ]);
+  }
 
   return (
     <main className="min-h-screen bg-[#F7F8F6] text-[#111827]">
@@ -680,7 +806,7 @@ export default function DealCalculatorClient() {
               {/* Analyze button */}
               <div className="flex flex-col">
                 <button
-                  onClick={handleAnalyze}
+                  onClick={handleAnalyzeAll}
                   disabled={!canAnalyze}
                   className="rounded-2xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-[#3F7668] disabled:opacity-60 disabled:hover:bg-[#2F5D50]"
                   title={
@@ -690,33 +816,34 @@ export default function DealCalculatorClient() {
                       ? "Pro / Pro+ only"
                       : usageLoading
                       ? "Loading usage…"
-                      : atLimit
-                      ? "Daily limit reached"
                       : !deal.askingPrice || !deal.sde
                       ? "Enter at least Asking Price + SDE"
-                      : "Run server analysis"
+                      : projAtLimit
+                      ? "AI will run, projection is at limit"
+                      : "Run analysis"
                   }
                 >
-                  {projLoading ? "Analyzing…" : "Analyze"}
+                  {projLoading || aiLoading ? "Analyzing…" : "Analyze"}
                 </button>
 
-                {/* usage */}
+                {/* usage (projection usage only) */}
                 {accessLoaded && canAnalyzeDeal ? (
                   <div className="mt-1 text-xs text-white/70">
                     {usageLoading ? (
                       "Loading usage…"
-                    ) : isUnlimited ? (
-                      "Unlimited analyzes"
-                    ) : atLimit ? (
+                    ) : projIsUnlimited ? (
+                      "Unlimited projections"
+                    ) : projAtLimit ? (
                       <span>
-                        Limit reached ({countToday}/{dailyLimit}).{" "}
+                        Projection limit reached ({projCountToday}/{projDailyLimit}).{" "}
                         <a href="/pricing" className="font-semibold text-white underline">
                           Upgrade to Pro+
-                        </a>
+                        </a>{" "}
+                        for unlimited projections. <span className="font-semibold">AI still runs.</span>
                       </span>
                     ) : (
                       <span>
-                        Today: {countToday}/{dailyLimit}
+                        Projections today: {projCountToday}/{projDailyLimit} (AI unlimited)
                       </span>
                     )}
                   </div>
@@ -743,11 +870,11 @@ export default function DealCalculatorClient() {
 
             {projError ? (
               <div className="rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm text-white/80 backdrop-blur">
-                <span className="font-semibold text-white">Analyze error:</span> {projError}
+                <span className="font-semibold text-white">Projection error:</span> {projError}
               </div>
             ) : projData ? (
               <div className="rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm text-white/80 backdrop-blur">
-                <span className="font-semibold text-white">Analyzed:</span>{" "}
+                <span className="font-semibold text-white">Projection analyzed:</span>{" "}
                 {new Date(projData.analyzedAt).toLocaleString()}
                 {isStale ? (
                   <span className="ml-2 rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-xs text-white/80">
@@ -763,17 +890,17 @@ export default function DealCalculatorClient() {
               <div className="rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm text-white/70 backdrop-blur">
                 Pro / Pro+ only — Analyze is locked.
               </div>
-            ) : atLimit ? (
+            ) : projAtLimit ? (
               <div className="rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm text-white/70 backdrop-blur">
-                Daily limit reached —{" "}
+                Projection limit reached —{" "}
                 <a href="/pricing" className="font-semibold text-white underline">
                   Upgrade to Pro+
                 </a>{" "}
-                for unlimited.
+                for unlimited projections. <span className="font-semibold text-white">AI still runs.</span>
               </div>
             ) : (
               <div className="rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-sm text-white/70 backdrop-blur">
-                Press <span className="font-semibold text-white">Analyze</span> to run the server model.
+                Press <span className="font-semibold text-white">Analyze</span> to run analysis.
               </div>
             )}
           </div>
@@ -828,6 +955,9 @@ export default function DealCalculatorClient() {
                   setProjLocked(false);
                   setLimitHit(false);
                   setLastAnalyzedSnapshot(null);
+
+                  setAiSummary(null);
+                  setAiError(null);
                 }}
                 className="rounded-xl border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#111827] hover:bg-black/[0.03]"
               >
@@ -871,12 +1001,20 @@ export default function DealCalculatorClient() {
 
               <div className="space-y-1.5">
                 <Label>Asking Price</Label>
-                <NumberInput value={deal.askingPrice} onChange={(n) => setDeal((d) => ({ ...d, askingPrice: n }))} placeholder="e.g. 600000" />
+                <NumberInput
+                  value={deal.askingPrice}
+                  onChange={(n) => setDeal((d) => ({ ...d, askingPrice: n }))}
+                  placeholder="e.g. 600000"
+                />
               </div>
 
               <div className="space-y-1.5">
                 <Label>SDE (Cash Flow)</Label>
-                <NumberInput value={deal.sde} onChange={(n) => setDeal((d) => ({ ...d, sde: n }))} placeholder="e.g. 200000" />
+                <NumberInput
+                  value={deal.sde}
+                  onChange={(n) => setDeal((d) => ({ ...d, sde: n }))}
+                  placeholder="e.g. 200000"
+                />
                 {results.extraExpensesTotal > 0 ? (
                   <div className="text-xs text-black/50">
                     Adjusted SDE subtracts extra expenses: {money(results.extraExpensesTotal)}
@@ -886,7 +1024,11 @@ export default function DealCalculatorClient() {
 
               <div className="space-y-1.5">
                 <Label>Revenue</Label>
-                <NumberInput value={deal.revenue} onChange={(n) => setDeal((d) => ({ ...d, revenue: n }))} placeholder="e.g. 900000" />
+                <NumberInput
+                  value={deal.revenue}
+                  onChange={(n) => setDeal((d) => ({ ...d, revenue: n }))}
+                  placeholder="e.g. 900000"
+                />
               </div>
 
               <div className="space-y-1.5">
@@ -912,22 +1054,36 @@ export default function DealCalculatorClient() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label>Loan Term (Years)</Label>
-                  <NumberInput value={deal.loanTermYears} onChange={(n) => setDeal((d) => ({ ...d, loanTermYears: n ?? 10 }))} placeholder="10" />
+                  <NumberInput
+                    value={deal.loanTermYears}
+                    onChange={(n) => setDeal((d) => ({ ...d, loanTermYears: n ?? 10 }))}
+                    placeholder="10"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Interest Rate (%)</Label>
-                  <NumberInput value={deal.interestRatePct} onChange={(n) => setDeal((d) => ({ ...d, interestRatePct: n ?? 10 }))} placeholder="10.0" />
+                  <NumberInput
+                    value={deal.interestRatePct}
+                    onChange={(n) => setDeal((d) => ({ ...d, interestRatePct: n ?? 10 }))}
+                    placeholder="10.0"
+                  />
                 </div>
               </div>
 
               <div className="space-y-1.5">
                 <Label>Closing Costs</Label>
-                <NumberInput value={deal.closingCosts} onChange={(n) => setDeal((d) => ({ ...d, closingCosts: n ?? 0 }))} placeholder="e.g. 25000" />
+                <NumberInput
+                  value={deal.closingCosts}
+                  onChange={(n) => setDeal((d) => ({ ...d, closingCosts: n ?? 0 }))}
+                  placeholder="e.g. 25000"
+                />
                 <label className="mt-1 flex items-center gap-2 text-xs text-black/60">
                   <input
                     type="checkbox"
                     checked={deal.includeClosingInLoan}
-                    onChange={(e) => setDeal((d) => ({ ...d, includeClosingInLoan: e.target.checked }))}
+                    onChange={(e) =>
+                      setDeal((d) => ({ ...d, includeClosingInLoan: e.target.checked }))
+                    }
                     className="h-4 w-4 accent-[#2F5D50]"
                   />
                   Include closing costs in loan
@@ -936,7 +1092,11 @@ export default function DealCalculatorClient() {
 
               <div className="space-y-1.5">
                 <Label>Down Payment (%)</Label>
-                <NumberInput value={deal.downPaymentPct} onChange={(n) => setDeal((d) => ({ ...d, downPaymentPct: n ?? 10 }))} placeholder="10" />
+                <NumberInput
+                  value={deal.downPaymentPct}
+                  onChange={(n) => setDeal((d) => ({ ...d, downPaymentPct: n ?? 10 }))}
+                  placeholder="10"
+                />
                 <div className="text-xs text-black/50">SBA assumes ~10% equity. Custom uses this value.</div>
               </div>
 
@@ -1084,19 +1244,59 @@ export default function DealCalculatorClient() {
           {/* CENTER */}
           <section className="min-w-0 flex-1">
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              <Card title="Asking Price" value={money(deal.askingPrice)} sub={bench?.median_asking_price !== undefined ? `Industry Avg: ${money(bench.median_asking_price)}` : "Industry Avg: —"} />
-              <Card title="Revenue" value={money(deal.revenue)} sub={bench?.median_revenue !== undefined ? `Industry Avg: ${money(bench.median_revenue)}` : "Industry Avg: —"} />
-              <Card title="Net Cash Flow (SDE)" value={money(results.sdeAdjusted)} sub={bench?.median_sde !== undefined ? `Industry Avg: ${money(bench.median_sde)}` : "Industry Avg: —"} />
+              <Card
+                title="Asking Price"
+                value={money(deal.askingPrice)}
+                sub={bench?.median_asking_price !== undefined ? `Industry Avg: ${money(bench.median_asking_price)}` : "Industry Avg: —"}
+              />
+              <Card
+                title="Revenue"
+                value={money(deal.revenue)}
+                sub={bench?.median_revenue !== undefined ? `Industry Avg: ${money(bench.median_revenue)}` : "Industry Avg: —"}
+              />
+              <Card
+                title="Net Cash Flow (SDE)"
+                value={money(results.sdeAdjusted)}
+                sub={bench?.median_sde !== undefined ? `Industry Avg: ${money(bench.median_sde)}` : "Industry Avg: —"}
+              />
 
-              <Card title="Cash Flow Multiple" value={results.cfMultiple === null ? "—" : `${num(results.cfMultiple, 2)}x`} sub={bench?.price_to_sde_multiple !== undefined ? `Industry Avg: ${num(bench.price_to_sde_multiple, 2)}x` : "Industry Avg: —"} />
-              <Card title="Revenue Multiple" value={results.revMultiple === null ? "—" : `${num(results.revMultiple, 2)}x`} sub={bench?.price_to_revenue_multiple !== undefined ? `Industry Avg: ${num(bench.price_to_revenue_multiple, 2)}x` : "Industry Avg: —"} />
-              <Card title="Profit Margin" value={results.margin === null ? "—" : pct(results.margin, 1)} sub={bench?.cashflow_margin_pct !== undefined ? `Industry Avg: ${pct(bench.cashflow_margin_pct, 1)}` : "Industry Avg: —"} />
+              <Card
+                title="Cash Flow Multiple"
+                value={results.cfMultiple === null ? "—" : `${num(results.cfMultiple, 2)}x`}
+                sub={bench?.price_to_sde_multiple !== undefined ? `Industry Avg: ${num(bench.price_to_sde_multiple, 2)}x` : "Industry Avg: —"}
+              />
+              <Card
+                title="Revenue Multiple"
+                value={results.revMultiple === null ? "—" : `${num(results.revMultiple, 2)}x`}
+                sub={bench?.price_to_revenue_multiple !== undefined ? `Industry Avg: ${num(bench.price_to_revenue_multiple, 2)}x` : "Industry Avg: —"}
+              />
+              <Card
+                title="Profit Margin"
+                value={results.margin === null ? "—" : pct(results.margin, 1)}
+                sub={bench?.cashflow_margin_pct !== undefined ? `Industry Avg: ${pct(bench.cashflow_margin_pct, 1)}` : "Industry Avg: —"}
+              />
 
-              <Card title="Total Acquisition Cost" value={money(results.totalAcquisitionCost)} sub={`Closing costs ${deal.includeClosingInLoan ? "included" : "excluded"} from loan`} />
-              <Card title="Upfront Cash Required" value={money(results.upfrontCash)} sub={`Equity: ${money(results.equity)}${deal.includeClosingInLoan ? "" : ` • Closing: ${money(deal.closingCosts)}`}`} />
-              <Card title="Loan Amount" value={money(results.loanAmt)} sub={bench?.median_sba_loan !== undefined ? `Industry Avg SBA Loan: ${money(bench.median_sba_loan)}` : "Industry Avg SBA Loan: —"} />
+              <Card
+                title="Total Acquisition Cost"
+                value={money(results.totalAcquisitionCost)}
+                sub={`Closing costs ${deal.includeClosingInLoan ? "included" : "excluded"} from loan`}
+              />
+              <Card
+                title="Upfront Cash Required"
+                value={money(results.upfrontCash)}
+                sub={`Equity: ${money(results.equity)}${deal.includeClosingInLoan ? "" : ` • Closing: ${money(deal.closingCosts)}`}`}
+              />
+              <Card
+                title="Loan Amount"
+                value={money(results.loanAmt)}
+                sub={bench?.median_sba_loan !== undefined ? `Industry Avg SBA Loan: ${money(bench.median_sba_loan)}` : "Industry Avg SBA Loan: —"}
+              />
 
-              <Card title="Monthly Payment" value={money(results.monthlyPay)} sub={`Term: ${deal.loanTermYears}y • Rate: ${pctFromPct(deal.interestRatePct, 2)}`} />
+              <Card
+                title="Monthly Payment"
+                value={money(results.monthlyPay)}
+                sub={`Term: ${deal.loanTermYears}y • Rate: ${pctFromPct(deal.interestRatePct, 2)}`}
+              />
               <Card title="Annual Debt Service" value={money(results.annualDebt)} sub="Monthly payment × 12" />
               <Card
                 title="DSCR"
@@ -1113,7 +1313,6 @@ export default function DealCalculatorClient() {
                 }
               />
 
-              {/* ✅ Pro + Pro+ get Year 1 net after Analyze */}
               <Card
                 title="Year 1 Net Profit"
                 value={
@@ -1123,15 +1322,14 @@ export default function DealCalculatorClient() {
                     ? "Analyzing…"
                     : projData
                     ? money(year1Net)
-                    : atLimit
-                    ? "Limit reached"
+                    : projAtLimit
+                    ? "Projection limit"
                     : "Press Analyze"
                 }
-                sub={projData ? "After debt, capex, taxes" : "Runs on server and counts toward daily limit"}
+                sub={projData ? "After debt, capex, taxes" : "Projection runs on server and may be limited"}
                 right={isStale && projData ? "Stale" : undefined}
               />
 
-              {/* ✅ Pro+ only: break-even + payback cards */}
               <Card
                 title="Break-even"
                 value={
@@ -1143,8 +1341,8 @@ export default function DealCalculatorClient() {
                     ? `Year ${projData.breakEvenYear}`
                     : projData
                     ? "Not in 5 years"
-                    : atLimit
-                    ? "Limit reached"
+                    : projAtLimit
+                    ? "Projection limit"
                     : "Press Analyze"
                 }
                 sub={!canUse5YearProjection ? "Upgrade to unlock" : "First year net turns positive"}
@@ -1161,8 +1359,8 @@ export default function DealCalculatorClient() {
                     ? `${num(projData.paybackYears, 1)} yrs`
                     : projData
                     ? "—"
-                    : atLimit
-                    ? "Limit reached"
+                    : projAtLimit
+                    ? "Projection limit"
                     : "Press Analyze"
                 }
                 sub={!canUse5YearProjection ? "Upgrade to unlock" : "Upfront cash ÷ Year 1 net"}
@@ -1200,7 +1398,7 @@ export default function DealCalculatorClient() {
               </div>
             </div>
 
-            {/* ✅ 5-year table is Pro+ only */}
+            {/* 5-year table (Pro+ only) */}
             <div className="mt-5 rounded-2xl border border-black/10 bg-white p-5 shadow-sm">
               <div className="flex flex-wrap items-end justify-between gap-2">
                 <div>
@@ -1229,7 +1427,7 @@ export default function DealCalculatorClient() {
                 <div className="mt-4 rounded-2xl border border-black/10 bg-[#F7F8F6] p-4">
                   <div className="text-sm font-semibold">Pro+ only</div>
                   <div className="mt-1 text-xs text-black/60">
-                    You can still Analyze on Pro, but the 5-year rows / break-even / payback table is Pro+.
+                    You can still run unlimited AI on Pro, but 5-year rows / break-even / payback table is Pro+.
                   </div>
                   <div className="mt-3">
                     <a
@@ -1242,15 +1440,15 @@ export default function DealCalculatorClient() {
                 </div>
               ) : projLoading ? (
                 <div className="mt-4 rounded-xl border border-black/10 bg-[#F7F8F6] p-4 text-sm text-black/60">
-                  Analyzing on server…
+                  Analyzing projection on server…
                 </div>
-              ) : atLimit ? (
+              ) : projAtLimit ? (
                 <div className="mt-4 rounded-xl border border-black/10 bg-[#F7F8F6] p-4 text-sm text-red-600">
-                  Daily limit reached.{" "}
+                  Projection daily limit reached.{" "}
                   <a href="/pricing" className="font-semibold underline">
                     Upgrade to Pro+
                   </a>{" "}
-                  for unlimited analyzes.
+                  for unlimited projections. <span className="font-semibold">AI is unlimited on Pro.</span>
                 </div>
               ) : projError ? (
                 <div className="mt-4 rounded-xl border border-black/10 bg-[#F7F8F6] p-4 text-sm text-red-600">
@@ -1314,55 +1512,148 @@ export default function DealCalculatorClient() {
           </section>
 
           {/* RIGHT */}
-          <aside className="w-[360px] shrink-0 rounded-2xl border border-black/10 bg-white p-5 shadow-sm">
-            <div className="text-sm font-bold">Analyze + Save</div>
-            <div className="mt-1 text-xs text-black/50">
-              {canAnalyzeDeal ? (
-                <>
-                  Press <span className="font-semibold text-[#111827]">Analyze</span> to run the server model.
-                  {canUse5YearProjection ? " (Pro+ shows 5-year table.)" : " (Pro+ unlocks 5-year table.)"}
-                </>
+          <aside className="w-[360px] shrink-0 space-y-4">
+            {/* AI card */}
+            <div className="rounded-2xl border border-black/10 bg-white p-5 shadow-sm">
+              {!aiSummary ? (
+                <div className="rounded-2xl border border-black/10 bg-white p-6 text-center shadow-sm">
+                  <div className="mx-auto max-w-[260px] text-sm text-black/70 leading-6">
+                    See how your deal stacks up against{" "}
+                    <span className="font-semibold text-[#2F5D50]">industry benchmarks</span>, get a tailored{" "}
+                    <span className="font-semibold text-[#2F5D50]">AI analysis</span>, and receive a{" "}
+                    <span className="font-semibold text-[#2F5D50]">UHQ AI Score</span>.
+                  </div>
+
+                  <button
+                    onClick={handleAnalyzeAll}
+                    disabled={!canAnalyze}
+                    className="mt-5 rounded-xl bg-[#2F5D50] px-5 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-[#3F7668] disabled:opacity-60"
+                  >
+                    {projLoading || aiLoading ? "Analyzing…" : "Analyze Deal"}
+                  </button>
+
+                  {aiError ? (
+                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-left text-sm text-red-700">
+                      {aiError}
+                    </div>
+                  ) : null}
+                </div>
               ) : (
-                <>Pro / Pro+ only.</>
+                <>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-bold">AI Summary</div>
+                      <div className="text-xs text-black/50">UHQ AI Score (Unlimited on Pro)</div>
+                    </div>
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full border border-black/10 text-base font-extrabold">
+                      {aiSummary.score}/10
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-black/50">
+                      Top Weaknesses
+                    </div>
+                    <ul className="mt-2 space-y-2 text-sm text-black/70">
+                      {aiSummary.topWeaknesses.map((w, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-black/40" />
+                          <span>{w}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-black/50">
+                      Summary
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-black/70">{aiSummary.summary}</p>
+                  </div>
+
+                  <div className="mt-4 flex gap-2">
+                    <button
+                      onClick={handleAnalyzeAll}
+                      disabled={!canAnalyze}
+                      className="flex-1 rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668] disabled:opacity-60"
+                    >
+                      {projLoading || aiLoading ? "Analyzing…" : "Re-Analyze"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setAiSummary(null);
+                        setAiError(null);
+                      }}
+                      className="rounded-xl border border-black/10 bg-white px-4 py-2 text-sm font-bold text-[#111827] hover:bg-black/[0.03]"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  {aiError ? (
+                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                      {aiError}
+                    </div>
+                  ) : null}
+                </>
               )}
             </div>
 
-            <div className="mt-4 rounded-2xl border border-black/10 bg-[#F7F8F6] p-4">
-              <div className="text-xs text-black/50">Saved payload includes</div>
-              <ul className="mt-2 list-disc pl-5 text-sm text-black/70 space-y-1">
-                <li>Deal inputs</li>
-                <li>Computed KPIs (DSCR, multiples, upfront cash)</li>
-                <li>Benchmark snapshot</li>
-                <li>
-                  5-year projection <span className="font-semibold">(Pro+ only)</span>
-                </li>
-              </ul>
-            </div>
+            {/* Analyze + Save card */}
+            <div className="rounded-2xl border border-black/10 bg-white p-5 shadow-sm">
+              <div className="text-sm font-bold">Analyze + Save</div>
+              <div className="mt-1 text-xs text-black/50">
+                {canAnalyzeDeal ? (
+                  <>
+                    Press <span className="font-semibold text-[#111827]">Analyze</span> to run analysis.
+                    {canUse5YearProjection ? " (Pro+ shows 5-year table.)" : " (Pro+ unlocks 5-year table.)"}{" "}
+                    <span className="font-semibold">AI is unlimited on Pro.</span>
+                  </>
+                ) : (
+                  <>Pro / Pro+ only.</>
+                )}
+              </div>
 
-            <div className="mt-4 space-y-2">
-              <button
-                onClick={handleAnalyze}
-                disabled={!canAnalyze}
-                className="w-full rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668] disabled:opacity-60"
-              >
-                {projLoading ? "Analyzing…" : "Analyze (counts toward limit)"}
-              </button>
+              <div className="mt-4 rounded-2xl border border-black/10 bg-[#F7F8F6] p-4">
+                <div className="text-xs text-black/50">Saved payload includes</div>
+                <ul className="mt-2 list-disc pl-5 text-sm text-black/70 space-y-1">
+                  <li>Deal inputs</li>
+                  <li>Computed KPIs (DSCR, multiples, upfront cash)</li>
+                  <li>Benchmark snapshot</li>
+                  <li>
+                    5-year projection <span className="font-semibold">(Pro+ only)</span>
+                  </li>
+                  <li>
+                    AI Summary <span className="font-semibold">(Unlimited on Pro/Pro+)</span>
+                  </li>
+                </ul>
+              </div>
 
-              {!canAnalyzeDeal ? (
-                <a
-                  href="/pricing"
-                  className="inline-flex w-full items-center justify-center rounded-xl border border-black/10 bg-white px-4 py-2 text-sm font-bold text-[#111827] hover:bg-black/[0.03]"
+              <div className="mt-4 space-y-2">
+                <button
+                  onClick={handleAnalyzeAll}
+                  disabled={!canAnalyze}
+                  className="w-full rounded-xl bg-[#2F5D50] px-4 py-2 text-sm font-bold text-white hover:bg-[#3F7668] disabled:opacity-60"
                 >
-                  Upgrade to Pro
-                </a>
-              ) : !canUse5YearProjection ? (
-                <a
-                  href="/pricing"
-                  className="inline-flex w-full items-center justify-center rounded-xl border border-black/10 bg-white px-4 py-2 text-sm font-bold text-[#111827] hover:bg-black/[0.03]"
-                >
-                  Upgrade to Pro+
-                </a>
-              ) : null}
+                  {projLoading || aiLoading ? "Analyzing…" : "Analyze"}
+                </button>
+
+                {!canAnalyzeDeal ? (
+                  <a
+                    href="/pricing"
+                    className="inline-flex w-full items-center justify-center rounded-xl border border-black/10 bg-white px-4 py-2 text-sm font-bold text-[#111827] hover:bg-black/[0.03]"
+                  >
+                    Upgrade to Pro
+                  </a>
+                ) : !canUse5YearProjection ? (
+                  <a
+                    href="/pricing"
+                    className="inline-flex w-full items-center justify-center rounded-xl border border-black/10 bg-white px-4 py-2 text-sm font-bold text-[#111827] hover:bg-black/[0.03]"
+                  >
+                    Upgrade to Pro+
+                  </a>
+                ) : null}
+              </div>
             </div>
           </aside>
         </div>
