@@ -6,6 +6,8 @@ import { prisma } from "@/src/lib/prisma";
 import { getEntitlements } from "@/src/lib/entitlements";
 import OpenAI from "openai";
 
+export const runtime = "nodejs";
+
 /* =========================
    Helpers
 ========================= */
@@ -48,120 +50,129 @@ type AiResp = {
   summary: string;
 };
 
-/* =========================
-   OpenAI
-========================= */
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+function fallbackResp(msg: string): AiResp {
+  return {
+    score: 1,
+    scoreBreakdown: null,
+    topWeaknesses: [
+      msg,
+      "Try again in a moment, or refresh the page.",
+      "If this keeps happening, check server logs for /api/deal-calculator/ai-summary.",
+    ],
+    summary: msg,
+  };
+}
 
 /* =========================
    Route
 ========================= */
 
 export async function POST(req: Request) {
-  const { userId } = await auth();
-  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    // ✅ FIX: auth() must be awaited in your version
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const access =
-    (await prisma.userAccess.findUnique({
-      where: { userId },
-      select: { plan: true, isAdmin: true },
-    })) ?? ({ plan: "free", isAdmin: false } as any);
+    const access =
+      (await prisma.userAccess.findUnique({
+        where: { userId },
+        select: { plan: true, isAdmin: true },
+      })) ?? ({ plan: "free", isAdmin: false } as any);
 
-  const ent = getEntitlements(access);
+    const ent = getEntitlements(access);
 
-  // Pro / Pro+ / Admin only
-  if (!ent.isPro && !ent.isProPlus && !ent.isAdmin) {
-    return NextResponse.json({ error: "Subscription required" }, { status: 403 });
-  }
+    if (!ent.isPro && !ent.isProPlus && !ent.isAdmin) {
+      return NextResponse.json({ error: "Subscription required" }, { status: 403 });
+    }
 
-  const body = (await req.json()) as any;
+    const body = (await req.json()) as any;
 
-  // IMPORTANT: unknown values should be null (not 0)
-  const askingPrice = safeNumber(body.askingPrice, null);
-  const revenue = safeNumber(body.revenue, null);
-  const sde = safeNumber(body.sde, null);
+    const askingPrice = safeNumber(body.askingPrice, null);
+    const revenue = safeNumber(body.revenue, null);
+    const sde = safeNumber(body.sde, null);
 
-  const dscr = safeNumber(body.dscr, null);
-  const cashflowMultiple = safeNumber(body.cashflowMultiple, null);
-  const revenueMultiple = safeNumber(body.revenueMultiple, null);
-  const profitMarginPct = safeNumber(body.profitMarginPct, null);
-  const upfrontCash = safeNumber(body.upfrontCash, null);
+    const dscr = safeNumber(body.dscr, null);
+    const cashflowMultiple = safeNumber(body.cashflowMultiple, null);
+    const revenueMultiple = safeNumber(body.revenueMultiple, null);
+    const profitMarginPct = safeNumber(body.profitMarginPct, null);
+    const upfrontCash = safeNumber(body.upfrontCash, null);
 
-  // Robust benchmark extraction (fixes TS "possibly null" + runtime issues)
-  const benchObj: any =
-    body?.benchmark && typeof body.benchmark === "object" ? body.benchmark : null;
+    const benchObj: any =
+      body?.benchmark && typeof body.benchmark === "object" ? body.benchmark : null;
 
-  const benchCfMultiple = benchObj ? safeNumber(benchObj.price_to_sde_multiple, null) : null;
-  const benchRevMultiple = benchObj ? safeNumber(benchObj.price_to_revenue_multiple, null) : null;
-
-  // In your UI payload benchmark.cashflow_margin_pct is likely decimal (0.12)
-  // We normalize to percent (12)
-  const benchMarginDec = benchObj ? safeNumber(benchObj.cashflow_margin_pct, null) : null;
-  const benchMarginPct = benchMarginDec === null ? null : benchMarginDec * 100;
-
-  const cfVsBench =
-    cashflowMultiple !== null && benchCfMultiple !== null
-      ? pctDelta(cashflowMultiple, benchCfMultiple)
+    const benchCfMultiple = benchObj ? safeNumber(benchObj.price_to_sde_multiple, null) : null;
+    const benchRevMultiple = benchObj
+      ? safeNumber(benchObj.price_to_revenue_multiple, null)
       : null;
 
-  const revVsBench =
-    revenueMultiple !== null && benchRevMultiple !== null
-      ? pctDelta(revenueMultiple, benchRevMultiple)
-      : null;
+    const benchMarginDec = benchObj ? safeNumber(benchObj.cashflow_margin_pct, null) : null;
+    const benchMarginPct = benchMarginDec === null ? null : benchMarginDec * 100;
 
-  const prompt = {
-    industry: String(body.industry ?? "Unknown"),
-    listingHost: safeHostname(body.listingUrl ?? null),
+    const cfVsBench =
+      cashflowMultiple !== null && benchCfMultiple !== null
+        ? pctDelta(cashflowMultiple, benchCfMultiple)
+        : null;
 
-    askingPrice,
-    revenue,
-    sde,
+    const revVsBench =
+      revenueMultiple !== null && benchRevMultiple !== null
+        ? pctDelta(revenueMultiple, benchRevMultiple)
+        : null;
 
-    dscr,
-    cashflowMultiple,
-    revenueMultiple,
-    profitMarginPct,
-    upfrontCash,
+    const prompt = {
+      industry: String(body.industry ?? "Unknown"),
+      listingHost: safeHostname(body.listingUrl ?? null),
 
-    benchmark: benchObj
-      ? {
-          price_to_sde_multiple: benchCfMultiple,
-          price_to_revenue_multiple: benchRevMultiple,
-          cashflow_margin_pct: benchMarginPct, // now 0–100
-          median_sde: safeNumber(benchObj.median_sde, null),
-          median_revenue: safeNumber(benchObj.median_revenue, null),
-          median_asking_price: safeNumber(benchObj.median_asking_price, null),
-        }
-      : null,
+      askingPrice,
+      revenue,
+      sde,
 
-    derived: {
-      cfMultiple_vs_benchmark_pct:
-        cfVsBench === null ? null : Math.round(cfVsBench * 100),
-      revMultiple_vs_benchmark_pct:
-        revVsBench === null ? null : Math.round(revVsBench * 100),
-    },
-  };
+      dscr,
+      cashflowMultiple,
+      revenueMultiple,
+      profitMarginPct,
+      upfrontCash,
 
-  // Short-circuit: missing required inputs (prevents “random 10”)
-  if (askingPrice === null || sde === null) {
-    const resp: AiResp = {
-      score: 1,
-      scoreBreakdown: null,
-      topWeaknesses: [
-        "Missing required inputs (Asking Price and/or SDE).",
-        "Add at least Asking Price + SDE to generate a real score.",
-        "Without SDE, debt coverage and valuation can’t be assessed.",
-      ],
-      summary:
-        "Enter Asking Price and SDE to generate an underwriting score and top weaknesses.",
+      benchmark: benchObj
+        ? {
+            price_to_sde_multiple: benchCfMultiple,
+            price_to_revenue_multiple: benchRevMultiple,
+            cashflow_margin_pct: benchMarginPct,
+            median_sde: safeNumber(benchObj.median_sde, null),
+            median_revenue: safeNumber(benchObj.median_revenue, null),
+            median_asking_price: safeNumber(benchObj.median_asking_price, null),
+          }
+        : null,
+
+      derived: {
+        cfMultiple_vs_benchmark_pct: cfVsBench === null ? null : Math.round(cfVsBench * 100),
+        revMultiple_vs_benchmark_pct: revVsBench === null ? null : Math.round(revVsBench * 100),
+      },
     };
-    return NextResponse.json(resp);
-  }
 
-  const system = `
+    if (askingPrice === null || sde === null) {
+      const resp: AiResp = {
+        score: 1,
+        scoreBreakdown: null,
+        topWeaknesses: [
+          "Missing required inputs (Asking Price and/or SDE).",
+          "Add at least Asking Price + SDE to generate a real score.",
+          "Without SDE, debt coverage and valuation can’t be assessed.",
+        ],
+        summary: "Enter Asking Price and SDE to generate an underwriting score and top weaknesses.",
+      };
+      return NextResponse.json(resp);
+    }
+
+    const key = process.env.OPENAI_API_KEY;
+    if (!key) {
+      return NextResponse.json(fallbackResp("Server is missing OPENAI_API_KEY."), {
+        status: 500,
+      });
+    }
+
+    const system = `
 You are a blunt, professional small-business underwriting assistant.
 Score deals from 1–10 using a STRICT rubric.
 
@@ -206,34 +217,53 @@ Return ONLY valid JSON with:
 }
 `.trim();
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: JSON.stringify(prompt, null, 2) },
-    ],
-  });
+    const openai = new OpenAI({ apiKey: key });
 
-  const raw = completion.choices[0]?.message?.content ?? "{}";
+    let raw = "";
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(prompt, null, 2) },
+        ],
+      });
 
-  let parsed: any = {};
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = {};
+      raw = completion.choices?.[0]?.message?.content ?? "";
+    } catch (e) {
+      console.error("OpenAI call failed:", e);
+      return NextResponse.json(fallbackResp("AI service error while generating analysis."), {
+        status: 502,
+      });
+    }
+
+    if (!raw || raw.trim().length === 0) {
+      return NextResponse.json(fallbackResp("AI returned an empty response."), { status: 502 });
+    }
+
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error("AI JSON parse failed. Raw:", raw);
+      return NextResponse.json(fallbackResp("AI returned invalid JSON."), { status: 502 });
+    }
+
+    const resp: AiResp = {
+      score: clampScore(parsed?.score),
+      scoreBreakdown:
+        parsed && typeof parsed.scoreBreakdown === "object" ? parsed.scoreBreakdown : null,
+      topWeaknesses: Array.isArray(parsed?.topWeaknesses)
+        ? parsed.topWeaknesses.slice(0, 5).map(String)
+        : ["No weaknesses returned (AI output missing topWeaknesses)."],
+      summary: String(parsed?.summary ?? "").trim() || "No summary returned by AI.",
+    };
+
+    return NextResponse.json(resp);
+  } catch (err) {
+    console.error("ai-summary route crashed:", err);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
-
-  const resp: AiResp = {
-    score: clampScore(parsed.score),
-    scoreBreakdown:
-      parsed && typeof parsed.scoreBreakdown === "object" ? parsed.scoreBreakdown : null,
-    topWeaknesses: Array.isArray(parsed.topWeaknesses)
-      ? parsed.topWeaknesses.slice(0, 5).map(String)
-      : [],
-    summary: String(parsed.summary ?? ""),
-  };
-
-  return NextResponse.json(resp);
 }
